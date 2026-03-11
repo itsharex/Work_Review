@@ -45,5 +45,4 @@ venv/
 # Project docs (local only)
 plan-*.md
 TEST_REPORT_*.md
-CHANGELOG.md
 src-tauri/icons.backup/
