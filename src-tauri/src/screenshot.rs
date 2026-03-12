@@ -76,9 +76,43 @@ impl ScreenshotService {
         }
     }
 
-    /// 执行截屏（Windows - 使用 Windows Graphics Capture API）
+    /// 执行截屏（Windows）
+    /// 优先使用 Windows Graphics Capture API (Win11)
+    /// 失败时降级使用 GDI BitBlt (Win10 兼容)
     #[cfg(target_os = "windows")]
     pub fn capture(&self) -> Result<ScreenshotResult> {
+        // 生成文件路径
+        let now = chrono::Local::now();
+        let date_str = now.format("%Y-%m-%d").to_string();
+        let time_str = now.format("%H%M%S_%3f").to_string();
+
+        let screenshots_dir = self.data_dir.join("screenshots").join(&date_str);
+        std::fs::create_dir_all(&screenshots_dir)?;
+
+        let final_jpg = screenshots_dir.join(format!("{time_str}.jpg"));
+
+        // 先尝试 Windows Graphics Capture API
+        match self.capture_with_wgc(&screenshots_dir, &time_str) {
+            Ok(result) => {
+                return self.process_and_save_image(&result.0, &final_jpg, result.1, result.2, now.timestamp());
+            }
+            Err(e) => {
+                log::warn!("Windows Graphics Capture 失败: {e}，降级到 GDI 模式");
+            }
+        }
+
+        // 降级使用 GDI BitBlt（Windows 10 兼容方案）
+        match self.capture_with_gdi() {
+            Ok((pixels, width, height)) => {
+                self.save_rgba_to_jpeg(&pixels, width, height, &final_jpg, now.timestamp())
+            }
+            Err(e) => Err(AppError::Screenshot(format!("GDI 截图也失败: {e}")))
+        }
+    }
+
+    /// 使用 Windows Graphics Capture API 截屏
+    #[cfg(target_os = "windows")]
+    fn capture_with_wgc(&self, screenshots_dir: &Path, time_str: &str) -> Result<(PathBuf, u32, u32)> {
         use std::sync::{
             atomic::{AtomicBool, Ordering},
             Arc, Mutex,
@@ -94,19 +128,8 @@ impl ScreenshotService {
             },
         };
 
-        // 生成文件路径
-        let now = chrono::Local::now();
-        let date_str = now.format("%Y-%m-%d").to_string();
-        let time_str = now.format("%H%M%S_%3f").to_string();
-
-        let screenshots_dir = self.data_dir.join("screenshots").join(&date_str);
-        std::fs::create_dir_all(&screenshots_dir)?;
-
-        // 先保存为 PNG (临时文件)
         let temp_png = screenshots_dir.join(format!("{time_str}_temp.png"));
-        let final_jpg = screenshots_dir.join(format!("{time_str}.jpg"));
 
-        // 共享状态
         struct CaptureResult {
             success: bool,
             error: Option<String>,
@@ -122,7 +145,6 @@ impl ScreenshotService {
         }));
         let captured = Arc::new(AtomicBool::new(false));
 
-        // 捕获处理器
         struct SingleFrameCapture {
             result: Arc<Mutex<CaptureResult>>,
             captured: Arc<AtomicBool>,
@@ -148,7 +170,6 @@ impl ScreenshotService {
                 frame: &mut Frame,
                 capture_control: InternalCaptureControl,
             ) -> std::result::Result<(), Self::Error> {
-                // 只捕获第一帧
                 if self.captured.load(Ordering::SeqCst) {
                     capture_control.stop();
                     return Ok(());
@@ -156,11 +177,9 @@ impl ScreenshotService {
 
                 self.captured.store(true, Ordering::SeqCst);
 
-                // 获取尺寸
                 let width = frame.width();
                 let height = frame.height();
 
-                // 保存为图片
                 use windows_capture::frame::ImageFormat;
                 match frame.save_as_image(&self.output_path, ImageFormat::Png) {
                     Ok(()) => {
@@ -186,12 +205,10 @@ impl ScreenshotService {
             }
         }
 
-        // 获取主显示器
         let primary_monitor = Monitor::primary()
             .map_err(|e| AppError::Screenshot(format!("获取主显示器失败: {e}")))?;
 
-        // 先尝试 WithoutBorder（Win11 及部分新版 Win10 支持）
-        // 失败后自动降级到 WithBorder（兼容所有 Win10 版本）
+        // 尝试 WithoutBorder
         let flags = (result.clone(), captured.clone(), temp_png.clone());
         let settings = Settings::new(
             primary_monitor.clone(),
@@ -212,19 +229,16 @@ impl ScreenshotService {
             Err(_) => Err("捕获线程异常".to_string()),
         };
 
-        // 首次尝试失败时，降级到 WithBorder 兼容模式
+        // 首次失败时降级到 WithBorder
         if let Err(ref first_err) = first_attempt {
-            log::warn!("截屏首次尝试失败（可能是 Win10 不支持 WithoutBorder）: {first_err}，降级为 WithBorder 模式");
+            log::debug!("WithoutBorder 失败: {first_err}，尝试 WithBorder");
 
-            // 重置共享状态
             {
                 let mut r = result.lock().map_err(|_| AppError::Screenshot("锁错误".to_string()))?;
                 r.success = false;
                 r.error = None;
-                r.width = 0;
-                r.height = 0;
             }
-            captured.store(false, std::sync::atomic::Ordering::SeqCst);
+            captured.store(false, Ordering::SeqCst);
 
             let flags2 = (result.clone(), captured.clone(), temp_png.clone());
             let primary_monitor2 = Monitor::primary()
@@ -245,43 +259,161 @@ impl ScreenshotService {
 
             match capture_handle2.join() {
                 Ok(Ok(())) => {}
-                Ok(Err(e)) => return Err(AppError::Screenshot(format!("捕获失败(降级模式): {e}"))),
-                Err(_) => return Err(AppError::Screenshot("捕获线程异常(降级模式)".to_string())),
+                Ok(Err(e)) => return Err(AppError::Screenshot(format!("WithBorder 也失败: {e}"))),
+                Err(_) => return Err(AppError::Screenshot("捕获线程异常".to_string())),
             }
         }
 
-        // 检查结果
-        let (success, error_msg, orig_width, orig_height) = {
-            let r = result
-                .lock()
-                .map_err(|_| AppError::Screenshot("锁错误".to_string()))?;
+        let (success, error_msg, width, height) = {
+            let r = result.lock().map_err(|_| AppError::Screenshot("锁错误".to_string()))?;
             (r.success, r.error.clone(), r.width, r.height)
         };
 
         if !success {
             let msg = error_msg.unwrap_or_else(|| "未知错误".to_string());
-            return Err(AppError::Screenshot(format!("截图失败: {msg}")));
+            return Err(AppError::Screenshot(msg));
         }
 
-        // 读取临时 PNG 并转换为 JPEG
-        let img = image::open(&temp_png)
+        Ok((temp_png, width, height))
+    }
+
+    /// 使用 GDI BitBlt 截屏（Windows 10 兼容方案）
+    #[cfg(target_os = "windows")]
+    fn capture_with_gdi(&self) -> Result<(Vec<u8>, u32, u32)> {
+        use std::ptr::null_mut;
+        use winapi::um::wingdi::{
+            BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject,
+            GetDIBits, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
+            SRCCOPY,
+        };
+        use winapi::um::winuser::{GetDC, GetSystemMetrics, ReleaseDC, SM_CXSCREEN, SM_CYSCREEN};
+
+        unsafe {
+            // 获取屏幕尺寸
+            let width = GetSystemMetrics(SM_CXSCREEN) as u32;
+            let height = GetSystemMetrics(SM_CYSCREEN) as u32;
+
+            if width == 0 || height == 0 {
+                return Err(AppError::Screenshot("获取屏幕尺寸失败".to_string()));
+            }
+
+            // 获取屏幕 DC
+            let screen_dc = GetDC(null_mut());
+            if screen_dc.is_null() {
+                return Err(AppError::Screenshot("获取屏幕 DC 失败".to_string()));
+            }
+
+            // 创建兼容 DC
+            let mem_dc = CreateCompatibleDC(screen_dc);
+            if mem_dc.is_null() {
+                ReleaseDC(null_mut(), screen_dc);
+                return Err(AppError::Screenshot("创建兼容 DC 失败".to_string()));
+            }
+
+            // 创建兼容位图
+            let bitmap = CreateCompatibleBitmap(screen_dc, width as i32, height as i32);
+            if bitmap.is_null() {
+                DeleteDC(mem_dc);
+                ReleaseDC(null_mut(), screen_dc);
+                return Err(AppError::Screenshot("创建位图失败".to_string()));
+            }
+
+            // 选择位图到内存 DC
+            let old_bitmap = SelectObject(mem_dc, bitmap as *mut _);
+
+            // 复制屏幕内容
+            let blt_result = BitBlt(
+                mem_dc,
+                0, 0,
+                width as i32, height as i32,
+                screen_dc,
+                0, 0,
+                SRCCOPY,
+            );
+
+            if blt_result == 0 {
+                SelectObject(mem_dc, old_bitmap);
+                DeleteObject(bitmap as *mut _);
+                DeleteDC(mem_dc);
+                ReleaseDC(null_mut(), screen_dc);
+                return Err(AppError::Screenshot("BitBlt 失败".to_string()));
+            }
+
+            // 准备获取像素数据
+            let mut bmi = BITMAPINFO {
+                bmiHeader: BITMAPINFOHEADER {
+                    biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                    biWidth: width as i32,
+                    biHeight: -(height as i32), // 负值表示自上而下
+                    biPlanes: 1,
+                    biBitCount: 32,
+                    biCompression: BI_RGB,
+                    biSizeImage: 0,
+                    biXPelsPerMeter: 0,
+                    biYPelsPerMeter: 0,
+                    biClrUsed: 0,
+                    biClrImportant: 0,
+                },
+                bmiColors: [std::mem::zeroed(); 1],
+            };
+
+            let mut pixels: Vec<u8> = vec![0; (width * height * 4) as usize];
+
+            let lines = GetDIBits(
+                mem_dc,
+                bitmap,
+                0,
+                height,
+                pixels.as_mut_ptr() as *mut _,
+                &mut bmi,
+                DIB_RGB_COLORS,
+            );
+
+            // 清理资源
+            SelectObject(mem_dc, old_bitmap);
+            DeleteObject(bitmap as *mut _);
+            DeleteDC(mem_dc);
+            ReleaseDC(null_mut(), screen_dc);
+
+            if lines == 0 {
+                return Err(AppError::Screenshot("GetDIBits 失败".to_string()));
+            }
+
+            // BGRA -> RGBA
+            for chunk in pixels.chunks_exact_mut(4) {
+                chunk.swap(0, 2); // B <-> R
+            }
+
+            log::info!("GDI 截图成功: {}x{}", width, height);
+            Ok((pixels, width, height))
+        }
+    }
+
+    /// 处理临时 PNG 并保存为 JPEG
+    #[cfg(target_os = "windows")]
+    fn process_and_save_image(
+        &self,
+        temp_png: &Path,
+        final_jpg: &Path,
+        orig_width: u32,
+        orig_height: u32,
+        timestamp: i64,
+    ) -> Result<ScreenshotResult> {
+        let img = image::open(temp_png)
             .map_err(|e| AppError::Screenshot(format!("读取截图失败: {e}")))?;
 
-        // 缩放
         let mut dynamic_image = img;
         if orig_width > self.config.max_width {
             let scale = self.config.max_width as f32 / orig_width as f32;
             let new_height = (orig_height as f32 * scale) as u32;
-            dynamic_image =
-                dynamic_image.resize(self.config.max_width, new_height, FilterType::Lanczos3);
+            dynamic_image = dynamic_image.resize(self.config.max_width, new_height, FilterType::Lanczos3);
         }
 
         let final_width = dynamic_image.width();
         let final_height = dynamic_image.height();
 
-        // 保存为 JPEG
         let rgb_image = dynamic_image.to_rgb8();
-        let mut output_file = std::fs::File::create(&final_jpg)?;
+        let mut output_file = std::fs::File::create(final_jpg)?;
         let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(
             &mut output_file,
             self.config.jpeg_quality,
@@ -294,10 +426,9 @@ impl ScreenshotService {
         )?;
 
         // 删除临时 PNG
-        let _ = std::fs::remove_file(&temp_png);
+        let _ = std::fs::remove_file(temp_png);
 
-        let timestamp = now.timestamp();
-        let file_size = std::fs::metadata(&final_jpg).map(|m| m.len()).unwrap_or(0);
+        let file_size = std::fs::metadata(final_jpg).map(|m| m.len()).unwrap_or(0);
         log::info!(
             "截屏保存到: {:?} ({}x{}, {} KB)",
             final_jpg,
@@ -307,7 +438,64 @@ impl ScreenshotService {
         );
 
         Ok(ScreenshotResult {
-            path: final_jpg,
+            path: final_jpg.to_path_buf(),
+            timestamp,
+            width: final_width,
+            height: final_height,
+        })
+    }
+
+    /// 将 RGBA 像素数据保存为 JPEG
+    #[cfg(target_os = "windows")]
+    fn save_rgba_to_jpeg(
+        &self,
+        pixels: &[u8],
+        width: u32,
+        height: u32,
+        path: &Path,
+        timestamp: i64,
+    ) -> Result<ScreenshotResult> {
+        // 从 RGBA 创建图像
+        let img = image::RgbaImage::from_raw(width, height, pixels.to_vec())
+            .ok_or_else(|| AppError::Screenshot("创建图像失败".to_string()))?;
+
+        let mut dynamic_image = DynamicImage::ImageRgba8(img);
+
+        // 缩放
+        if width > self.config.max_width {
+            let scale = self.config.max_width as f32 / width as f32;
+            let new_height = (height as f32 * scale) as u32;
+            dynamic_image = dynamic_image.resize(self.config.max_width, new_height, FilterType::Lanczos3);
+        }
+
+        let final_width = dynamic_image.width();
+        let final_height = dynamic_image.height();
+
+        // 保存为 JPEG
+        let rgb_image = dynamic_image.to_rgb8();
+        let mut output_file = std::fs::File::create(path)?;
+        let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(
+            &mut output_file,
+            self.config.jpeg_quality,
+        );
+        encoder.encode(
+            rgb_image.as_raw(),
+            final_width,
+            final_height,
+            ColorType::Rgb8.into(),
+        )?;
+
+        let file_size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+        log::info!(
+            "GDI 截屏保存到: {:?} ({}x{}, {} KB)",
+            path,
+            final_width,
+            final_height,
+            file_size / 1024
+        );
+
+        Ok(ScreenshotResult {
+            path: path.to_path_buf(),
             timestamp,
             width: final_width,
             height: final_height,

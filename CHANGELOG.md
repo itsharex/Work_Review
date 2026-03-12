@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.3] - 2026-03-12
+
+### 新增
+- 智能空闲检测：自动解决"应用挂着不用但时长继续累加"的问题
+  - 两阶段检测机制：
+    - 第一阶段：键鼠活动检测（Windows: `GetLastInputInfo`，macOS: `CGEventSourceSecondsSinceLastEventType`）
+    - 第二阶段：屏幕内容变化检测（截图哈希比对）
+  - 智能判断逻辑：
+    - 有键鼠操作 → 活跃，正常计时
+    - 无键鼠操作但屏幕有变化 → 活跃（终端运行程序、视频播放等场景）
+    - 无键鼠操作且屏幕连续 3 次无变化 → 空闲，暂停计时
+  - 跨平台支持：Windows 和 macOS 双平台完整实现
+  - 无需配置：固定 3 分钟阈值，自动工作，用户无感知
+
+### 修复
+- 修复 Windows 10 截图和应用统计不工作的问题
+  - 新增 GDI BitBlt 截图备用方案，当 Windows Graphics Capture API 失败时自动降级
+  - Windows 11 优先使用 WGC API（高性能），Windows 10 自动切换到 GDI 方案（兼容性优先）
+  - 解决了 Win10 与 Win11 截图 API 不兼容导致的记录缺失问题
+
 ## [1.0.2] - 2026-03-11
 
 ### 修复

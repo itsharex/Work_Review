@@ -11,6 +11,7 @@ mod commands;
 mod config;
 mod database;
 mod error;
+mod idle_detector;
 mod monitor;
 mod ocr;
 mod ocr_logger;
@@ -81,6 +82,13 @@ async fn background_screenshot_task(state: Arc<Mutex<AppState>>, window: tauri::
     let mut _last_browser_url: Option<String> = None; // 预留
 
     let mut last_capture_time = std::time::Instant::now();
+
+    // ===== 空闲检测器 =====
+    // 固定 3 分钟空闲阈值：无键鼠操作且屏幕内容无变化时暂停计时
+    const IDLE_TIMEOUT_MINUTES: u64 = 3;
+    let idle_detector = idle_detector::IdleDetector::new(IDLE_TIMEOUT_MINUTES);
+    let mut last_idle_log_time = std::time::Instant::now();
+    let mut is_currently_idle = false; // 当前是否处于空闲状态
 
     const MIN_CAPTURE_INTERVAL_MS: u128 = 3000; // 最小截图间隔3秒（防抖）
     const POLL_INTERVAL_SECS: u64 = 5; // 轮询间隔5秒（更精确的时长计算）
@@ -167,6 +175,23 @@ async fn background_screenshot_task(state: Arc<Mutex<AppState>>, window: tauri::
             // 未切换，使用轮询间隔作为增量
             POLL_INTERVAL_SECS as i64
         };
+
+        // ===== 空闲检测第一阶段：键鼠活动检查 =====
+        let input_idle = idle_detector.is_input_idle();
+
+        // 每 30 秒打印一次空闲状态日志（避免刷屏）
+        if last_idle_log_time.elapsed() >= Duration::from_secs(30) {
+            if input_idle != is_currently_idle {
+                if input_idle {
+                    log::info!("⏸️  键鼠超时，等待截图确认空闲状态...");
+                } else {
+                    log::info!("▶️  检测到用户活动，恢复正常记录");
+                    idle_detector.reset();
+                }
+                is_currently_idle = input_idle;
+            }
+            last_idle_log_time = std::time::Instant::now();
+        }
 
         // ===== 判断是否截图 =====
         // 1. 定时触发：到达配置的间隔时间
@@ -291,12 +316,37 @@ async fn background_screenshot_task(state: Arc<Mutex<AppState>>, window: tauri::
                         state_guard.screenshot_service.capture()
                     };
 
+                    // ===== 空闲检测第二阶段：截图哈希确认 =====
+                    // 只有键鼠超时时才检查屏幕变化，避免正常使用时的额外计算
+                    let is_confirmed_idle = if input_idle {
+                        if let Ok(ref screenshot) = screenshot_result {
+                            let hash = screenshot::ScreenshotService::calculate_image_hash(&screenshot.path)
+                                .unwrap_or(0);
+                            idle_detector.confirm_idle_with_hash(hash)
+                        } else {
+                            false
+                        }
+                    } else {
+                        // 有键鼠活动，重置空闲检测器
+                        idle_detector.reset();
+                        false
+                    };
+
+                    // 如果确认空闲，跳过时长记录
+                    let effective_duration = if is_confirmed_idle {
+                        log::debug!("空闲确认: 跳过本次时长记录");
+                        0
+                    } else {
+                        duration_to_record
+                    };
+
                     // 合并记录（不更新 screenshot_path，保留活动创建时的原始截图）
-                    {
+                    // 即使 effective_duration 为 0，也需要更新时间戳以保持记录活跃
+                    if effective_duration > 0 {
                         let state_guard = state.lock().unwrap();
                         match state_guard.database.merge_activity(
                             latest_id,
-                            duration_to_record,
+                            effective_duration,
                             None,
                             &latest.screenshot_path, // 保留原始截图路径不变
                             current_timestamp,
@@ -306,7 +356,7 @@ async fn background_screenshot_task(state: Arc<Mutex<AppState>>, window: tauri::
                                     "✅ 合并成功: {} (id={}, 新时长={}s)",
                                     active_window.app_name,
                                     latest_id,
-                                    latest.duration + duration_to_record
+                                    latest.duration + effective_duration
                                 );
                             }
                             Err(e) => {
@@ -390,7 +440,7 @@ async fn background_screenshot_task(state: Arc<Mutex<AppState>>, window: tauri::
                         screenshot_path: latest.screenshot_path,
                         ocr_text: None,
                         category,
-                        duration: latest.duration + duration_to_record,
+                        duration: latest.duration + effective_duration,
                         browser_url: active_window.browser_url,
                     })
                 } else {
@@ -402,6 +452,24 @@ async fn background_screenshot_task(state: Arc<Mutex<AppState>>, window: tauri::
 
                     match screenshot_result {
                         Ok(screenshot_result) => {
+                            // ===== 空闲检测第二阶段：截图哈希确认 =====
+                            let is_confirmed_idle = if input_idle {
+                                let hash = screenshot::ScreenshotService::calculate_image_hash(&screenshot_result.path)
+                                    .unwrap_or(0);
+                                idle_detector.confirm_idle_with_hash(hash)
+                            } else {
+                                idle_detector.reset();
+                                false
+                            };
+
+                            // 如果确认空闲，跳过时长记录（但仍创建活动记录以保持截图）
+                            let effective_duration = if is_confirmed_idle {
+                                log::debug!("空闲确认: 新活动时长设为 0");
+                                0
+                            } else {
+                                duration_to_record
+                            };
+
                             let (relative_path, data_dir_clone) = {
                                 let state_guard = state.lock().unwrap();
                                 (
@@ -420,7 +488,7 @@ async fn background_screenshot_task(state: Arc<Mutex<AppState>>, window: tauri::
                                 screenshot_path: relative_path.clone(),
                                 ocr_text: None,
                                 category,
-                                duration: duration_to_record,
+                                duration: effective_duration,
                                 browser_url: active_window.browser_url,
                             };
 
