@@ -1,9 +1,0 @@
-E:\data\Work_Review\test_uia\target\debug\deps\uiautomation_derive-a3b295825b045b5d.d: C:\Users\Administrator\.cargo\registry\src\rsproxy.cn-e3de039b2554c837\uiautomation_derive-0.7.7\src\lib.rs C:\Users\Administrator\.cargo\registry\src\rsproxy.cn-e3de039b2554c837\uiautomation_derive-0.7.7\src\enum_derives.rs C:\Users\Administrator\.cargo\registry\src\rsproxy.cn-e3de039b2554c837\uiautomation_derive-0.7.7\src\action_derives.rs C:\Users\Administrator\.cargo\registry\src\rsproxy.cn-e3de039b2554c837\uiautomation_derive-0.7.7\src\control_derives.rs C:\Users\Administrator\.cargo\registry\src\rsproxy.cn-e3de039b2554c837\uiautomation_derive-0.7.7\src\pattern_derivers.rs
-
-E:\data\Work_Review\test_uia\target\debug\deps\uiautomation_derive-a3b295825b045b5d.dll: C:\Users\Administrator\.cargo\registry\src\rsproxy.cn-e3de039b2554c837\uiautomation_derive-0.7.7\src\lib.rs C:\Users\Administrator\.cargo\registry\src\rsproxy.cn-e3de039b2554c837\uiautomation_derive-0.7.7\src\enum_derives.rs C:\Users\Administrator\.cargo\registry\src\rsproxy.cn-e3de039b2554c837\uiautomation_derive-0.7.7\src\action_derives.rs C:\Users\Administrator\.cargo\registry\src\rsproxy.cn-e3de039b2554c837\uiautomation_derive-0.7.7\src\control_derives.rs C:\Users\Administrator\.cargo\registry\src\rsproxy.cn-e3de039b2554c837\uiautomation_derive-0.7.7\src\pattern_derivers.rs
-
-C:\Users\Administrator\.cargo\registry\src\rsproxy.cn-e3de039b2554c837\uiautomation_derive-0.7.7\src\lib.rs:
-C:\Users\Administrator\.cargo\registry\src\rsproxy.cn-e3de039b2554c837\uiautomation_derive-0.7.7\src\enum_derives.rs:
-C:\Users\Administrator\.cargo\registry\src\rsproxy.cn-e3de039b2554c837\uiautomation_derive-0.7.7\src\action_derives.rs:
-C:\Users\Administrator\.cargo\registry\src\rsproxy.cn-e3de039b2554c837\uiautomation_derive-0.7.7\src\control_derives.rs:
-C:\Users\Administrator\.cargo\registry\src\rsproxy.cn-e3de039b2554c837\uiautomation_derive-0.7.7\src\pattern_derivers.rs:

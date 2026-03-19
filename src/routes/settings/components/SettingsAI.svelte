@@ -1,5 +1,5 @@
 <script>
-  import { createEventDispatcher, onMount } from 'svelte';
+  import { createEventDispatcher, onDestroy, onMount } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
   import { aiStore } from '$lib/stores/ai.js';
   
@@ -150,12 +150,16 @@
       await testTextModel();
     }
   });
+
+  onDestroy(() => {
+    unsubscribe();
+  });
 </script>
 
 <!-- 日报模式切换：紧凑的分段控制 -->
 <!-- 模式选择与连接状态解耦，用户可先选模式再配置模型 -->
-<div class="mb-5">
-  <label class="block text-xs font-medium text-slate-600 dark:text-slate-400 mb-2">日报模式</label>
+<fieldset class="mb-5">
+  <legend class="block text-xs font-medium text-slate-600 dark:text-slate-400 mb-2">日报模式</legend>
   <div class="flex gap-2">
     {#each aiModes as mode}
       {@const isSelected = config.ai_mode === mode.value}
@@ -182,7 +186,7 @@
       </button>
     {/each}
   </div>
-</div>
+</fieldset>
 
 <!-- AI 模型配置：仅在 AI 增强模式或云端模式下展开 -->
 {#if isAiMode}

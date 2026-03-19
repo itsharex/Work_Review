@@ -191,7 +191,10 @@ impl StorageManager {
                 Ok(_) => {
                     deleted_count += 1;
                     current_size = current_size.saturating_sub(dir_size);
-                    log::info!("存储超限，已删除最旧目录: {date} (释放 {:.1} MB)", dir_size as f64 / 1024.0 / 1024.0);
+                    log::info!(
+                        "存储超限，已删除最旧目录: {date} (释放 {:.1} MB)",
+                        dir_size as f64 / 1024.0 / 1024.0
+                    );
                 }
                 Err(e) => {
                     log::warn!("删除目录失败 {date}: {e}");

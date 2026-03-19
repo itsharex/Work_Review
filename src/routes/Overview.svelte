@@ -243,10 +243,10 @@
   class="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4"
   role="button"
   tabindex="0"
-  on:click={() => selectedBrowser = null}
+  on:click|self={() => selectedBrowser = null}
   on:keydown={(e) => e.key === 'Escape' && (selectedBrowser = null)}
 >
-  <div class="card p-0 max-w-2xl w-full max-h-[85vh] overflow-hidden flex flex-col" role="dialog" aria-modal="true" on:click|stopPropagation on:keydown|stopPropagation>
+  <div class="card p-0 max-w-2xl w-full max-h-[85vh] overflow-hidden flex flex-col" role="dialog" aria-modal="true">
     <!-- 弹窗头部 -->
     <div class="flex items-center justify-between p-5 border-b border-slate-200 dark:border-slate-700 bg-gradient-to-r from-slate-50 to-white dark:from-slate-800 dark:to-slate-900">
       <div class="flex items-center gap-3">
@@ -333,4 +333,3 @@
   </div>
 </div>
 {/if}
-

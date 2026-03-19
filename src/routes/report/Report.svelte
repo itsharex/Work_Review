@@ -22,6 +22,7 @@
   let selectedDate = getLocalDateString();
   let isYesterdayReport = false; // 标记是否显示的是昨日日报
   let config = null; // 当前配置
+  let lastLoadedDate = '';
 
   // 获取 AI 模式显示名称
   function getAiModeName(mode) {
@@ -102,10 +103,9 @@
     }
   }
 
-  function handleDateChange() {
-      report = null;
-      isYesterdayReport = false;
-      loadReport();
+  function selectDate(date) {
+    if (!date || date === selectedDate) return;
+    selectedDate = date;
   }
 
   async function generateReport(force = true) {
@@ -128,18 +128,19 @@
     return marked(content);
   }
 
-  function formatFullDate() {
-    const date = new Date();
-    return date.toLocaleDateString('zh-CN', { year: 'numeric', month: 'long', day: 'numeric', weekday: 'long' });
-  }
-
   function formatReportDate(dateStr) {
     const date = new Date(dateStr);
     return date.toLocaleDateString('zh-CN', { year: 'numeric', month: 'long', day: 'numeric', weekday: 'long' });
   }
 
-  onMount(() => {
+  $: if (selectedDate && selectedDate !== lastLoadedDate) {
+    lastLoadedDate = selectedDate;
+    report = null;
+    isYesterdayReport = false;
     loadReport();
+  }
+
+  onMount(() => {
     loadConfig();
     
     // 如果当前选中的是今天，跨越午夜时自动更新。
@@ -163,13 +164,6 @@
         <h2 class="text-xl font-bold text-slate-800 dark:text-white">
           {selectedDate === getLocalDateString() ? '今日日报' : '历史日报'}
         </h2>
-        <input 
-          type="date" 
-          max={getLocalDateString()} 
-          bind:value={selectedDate} 
-          on:change={handleDateChange}
-          class="px-2 py-1 text-sm bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg text-slate-700 dark:text-slate-300 focus:outline-none focus:ring-2 focus:ring-indigo-500/50"
-        />
       </div>
       <p class="text-sm text-slate-400 dark:text-slate-500 mt-1">
         {formatReportDate(selectedDate)}
@@ -185,6 +179,27 @@
           {/if}
         {/if}
       </p>
+      <div class="flex flex-wrap items-center gap-2 mt-3">
+        <button
+          class="px-3 py-1.5 text-xs rounded-lg border transition-colors {selectedDate === getLocalDateString() ? 'bg-indigo-50 border-indigo-200 text-indigo-700 dark:bg-indigo-950/40 dark:border-indigo-800 dark:text-indigo-300' : 'bg-white border-slate-200 text-slate-500 hover:bg-slate-50 dark:bg-slate-800 dark:border-slate-700 dark:text-slate-400 dark:hover:bg-slate-700'}"
+          on:click={() => selectDate(getLocalDateString())}
+        >
+          今天
+        </button>
+        <button
+          class="px-3 py-1.5 text-xs rounded-lg border transition-colors {selectedDate === getYesterdayDateString() ? 'bg-indigo-50 border-indigo-200 text-indigo-700 dark:bg-indigo-950/40 dark:border-indigo-800 dark:text-indigo-300' : 'bg-white border-slate-200 text-slate-500 hover:bg-slate-50 dark:bg-slate-800 dark:border-slate-700 dark:text-slate-400 dark:hover:bg-slate-700'}"
+          on:click={() => selectDate(getYesterdayDateString())}
+        >
+          昨天
+        </button>
+        <input 
+          type="date"
+          max={getLocalDateString()}
+          bind:value={selectedDate}
+          class="px-2 py-1.5 text-sm bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg text-slate-700 dark:text-slate-300 focus:outline-none focus:ring-2 focus:ring-indigo-500/50"
+        />
+        <span class="text-xs text-slate-400 dark:text-slate-500">可切换到任意历史日期查看历史日报</span>
+      </div>
     </div>
     {#if report}
       <button

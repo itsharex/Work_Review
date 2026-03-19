@@ -585,10 +585,10 @@
     class="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4"
     role="button"
     tabindex="0"
-    on:click={closeDetail}
+    on:click|self={closeDetail}
     on:keydown={(e) => e.key === 'Escape' && closeDetail()}
   >
-    <div class="bg-white dark:bg-slate-800 rounded-xl shadow-xl max-w-3xl w-full max-h-[90vh] overflow-auto" role="dialog" aria-modal="true" on:click|stopPropagation on:keydown|stopPropagation>
+    <div class="bg-white dark:bg-slate-800 rounded-xl shadow-xl max-w-3xl w-full max-h-[90vh] overflow-auto" role="dialog" aria-modal="true">
       <!-- 头部 -->
       <div class="p-6 border-b border-slate-200 dark:border-slate-700">
         <div class="flex items-center justify-between">

@@ -30,9 +30,9 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use storage::StorageManager;
-use tauri::{AppHandle, Manager, Emitter};
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
-use tauri::tray::{TrayIconBuilder, TrayIconEvent, MouseButton, MouseButtonState};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::{AppHandle, Emitter, Manager};
 
 // 全局 AppHandle，用于在 macOS Dock 点击时恢复窗口
 static APP_HANDLE: OnceCell<AppHandle> = OnceCell::new();
@@ -75,8 +75,8 @@ fn get_data_dir() -> PathBuf {
 async fn background_screenshot_task(state: Arc<Mutex<AppState>>, window: tauri::WebviewWindow) {
     // ===== 状态变量 =====
     let mut last_app_name: Option<String> = None;
-    let mut _last_app_window_title: Option<String> = None;
-    let mut _last_browser_url: Option<String> = None; // 预留
+    let mut last_app_window_title: Option<String> = None;
+    let mut last_browser_url: Option<String> = None;
 
     let mut last_capture_time = std::time::Instant::now();
 
@@ -150,10 +150,16 @@ async fn background_screenshot_task(state: Arc<Mutex<AppState>>, window: tauri::
             let app_lower = active_window.app_name.to_lowercase();
             let is_system_transient = matches!(
                 app_lower.as_str(),
-                "dock" | "systemuiserver" | "control center"
-                | "spotlight" | "notificationcenter" | "loginwindow"
-                | "screencaptureui" | "universalaccessauthwarn"
-                | "windowmanager" | "wallpaper"
+                "dock"
+                    | "systemuiserver"
+                    | "control center"
+                    | "spotlight"
+                    | "notificationcenter"
+                    | "loginwindow"
+                    | "screencaptureui"
+                    | "universalaccessauthwarn"
+                    | "windowmanager"
+                    | "wallpaper"
             );
             if is_system_transient {
                 log::debug!("跳过系统瞬态进程: {}", active_window.app_name);
@@ -162,14 +168,17 @@ async fn background_screenshot_task(state: Arc<Mutex<AppState>>, window: tauri::
         }
 
         // ===== 检测应用切换 =====
-        let url_changed = match (&_last_browser_url, &active_window.browser_url) {
+        let previous_window_title = last_app_window_title.clone();
+        let previous_browser_url = last_browser_url.clone();
+
+        let url_changed = match (&last_browser_url, &active_window.browser_url) {
             (Some(l), Some(r)) => l != r,
             (None, None) => false,
             _ => true,
         };
-        
+
         // 只有当两个标题不同时才算切换
-        let title_changed = match (&_last_app_window_title, &active_window.window_title) {
+        let title_changed = match (&last_app_window_title, &active_window.window_title) {
             (Some(last_title), active_title) => last_title != active_title,
             (None, _) => true,
         };
@@ -179,7 +188,11 @@ async fn background_screenshot_task(state: Arc<Mutex<AppState>>, window: tauri::
             None => true,
         };
         // 保存切换前的应用名，用于时长归属修正
-        let previous_app_name = if app_changed { last_app_name.clone() } else { None };
+        let previous_app_name = if app_changed {
+            last_app_name.clone()
+        } else {
+            None
+        };
 
         // 计算距离上次截图的时间
         let elapsed_since_capture = last_capture_time.elapsed();
@@ -229,19 +242,19 @@ async fn background_screenshot_task(state: Arc<Mutex<AppState>>, window: tauri::
 
         if !should_take_screenshot {
             // 如果是因为冷却时间未到而没有截图，但应用/标签页实际上已经变化了
-            // 那么我们**不要**更新 _last_* 变量，这样下一个轮询周期 app_changed 仍然为 true
+            // 那么我们不要更新 last_* 变量，这样下一个轮询周期 app_changed 仍然为 true
             if !app_changed {
                 last_app_name = Some(active_window.app_name.clone());
-                _last_app_window_title = Some(active_window.window_title.clone());
-                _last_browser_url = active_window.browser_url.clone();
+                last_app_window_title = Some(active_window.window_title.clone());
+                last_browser_url = active_window.browser_url.clone();
             }
             continue;
         }
 
         // 取决定截图后，才更新上一个应用的信息
         last_app_name = Some(active_window.app_name.clone());
-        _last_app_window_title = Some(active_window.window_title.clone());
-        _last_browser_url = active_window.browser_url.clone();
+        last_app_window_title = Some(active_window.window_title.clone());
+        last_browser_url = active_window.browser_url.clone();
 
         // 更新截图时间
         last_capture_time = std::time::Instant::now();
@@ -250,9 +263,11 @@ async fn background_screenshot_task(state: Arc<Mutex<AppState>>, window: tauri::
         // 而非固定的 POLL_INTERVAL_SECS，避免截图间隔大于轮询间隔时丢失时长
         let (privacy_action, duration_to_record) = {
             let state_guard = state.lock().unwrap_or_else(|e| e.into_inner());
-            let action = state_guard
-                .privacy_filter
-                .check_privacy(&active_window.app_name, &active_window.window_title);
+            let action = state_guard.privacy_filter.check_privacy_full(
+                &active_window.app_name,
+                &active_window.window_title,
+                active_window.browser_url.as_deref(),
+            );
             // elapsed_secs 是距离上次截图的真实秒数，确保时长不丢失
             let duration = elapsed_secs.max(POLL_INTERVAL_SECS) as i64;
             (action, duration)
@@ -275,7 +290,8 @@ async fn background_screenshot_task(state: Arc<Mutex<AppState>>, window: tauri::
                     active_window.app_name,
                     active_window.window_title
                 );
-                let category = monitor::categorize_app(&active_window.app_name, &active_window.window_title);
+                let category =
+                    monitor::categorize_app(&active_window.app_name, &active_window.window_title);
                 let activity = database::Activity {
                     id: None,
                     timestamp: chrono::Local::now().timestamp(),
@@ -299,7 +315,8 @@ async fn background_screenshot_task(state: Arc<Mutex<AppState>>, window: tauri::
                 }
             }
             PrivacyAction::Record => {
-                let category = monitor::categorize_app(&active_window.app_name, &active_window.window_title);
+                let category =
+                    monitor::categorize_app(&active_window.app_name, &active_window.window_title);
                 let current_timestamp = chrono::Local::now().timestamp();
 
                 // ===== 应用切换时长归属修正 =====
@@ -308,7 +325,42 @@ async fn background_screenshot_task(state: Arc<Mutex<AppState>>, window: tauri::
                 let adjusted_duration = if app_changed {
                     if let Some(ref prev_app) = previous_app_name {
                         let state_guard = state.lock().unwrap_or_else(|e| e.into_inner());
-                        if let Ok(Some(prev_activity)) = state_guard.database.get_latest_activity_by_app(prev_app) {
+                        let prev_activity = if let Some(prev_url) = previous_browser_url
+                            .as_deref()
+                            .filter(|url| !url.is_empty())
+                        {
+                            state_guard
+                                .database
+                                .get_latest_activity_by_url(prev_url)
+                                .ok()
+                                .flatten()
+                        } else if monitor::is_browser_app(prev_app) {
+                            previous_window_title
+                                .as_deref()
+                                .filter(|title| !title.is_empty())
+                                .and_then(|title| {
+                                    state_guard
+                                        .database
+                                        .get_latest_activity_by_app_title(prev_app, title)
+                                        .ok()
+                                        .flatten()
+                                })
+                                .or_else(|| {
+                                    state_guard
+                                        .database
+                                        .get_latest_activity_by_app(prev_app)
+                                        .ok()
+                                        .flatten()
+                                })
+                        } else {
+                            state_guard
+                                .database
+                                .get_latest_activity_by_app(prev_app)
+                                .ok()
+                                .flatten()
+                        };
+
+                        if let Some(prev_activity) = prev_activity {
                             if let Some(prev_id) = prev_activity.id {
                                 let _ = state_guard.database.merge_activity(
                                     prev_id,
@@ -319,7 +371,9 @@ async fn background_screenshot_task(state: Arc<Mutex<AppState>>, window: tauri::
                                 );
                                 log::debug!(
                                     "⏱️ 时长回补: {} +{}s (切换到 {})",
-                                    prev_app, duration_to_record, active_window.app_name
+                                    prev_app,
+                                    duration_to_record,
+                                    active_window.app_name
                                 );
                             }
                         }
@@ -332,20 +386,27 @@ async fn background_screenshot_task(state: Arc<Mutex<AppState>>, window: tauri::
                 // 先检查是否有可合并的记录（在截屏之前判断，避免不必要的截图保存）
                 let latest_activity = {
                     let state_guard = state.lock().unwrap_or_else(|e| e.into_inner());
-                    if let Some(ref url) = active_window.browser_url {
-                        if !url.is_empty() {
-                            state_guard
-                                .database
-                                .get_latest_activity_by_url(url)
-                                .ok()
-                                .flatten()
-                        } else {
-                            state_guard
-                                .database
-                                .get_latest_activity_by_app(&active_window.app_name)
-                                .ok()
-                                .flatten()
-                        }
+                    if let Some(url) = active_window
+                        .browser_url
+                        .as_deref()
+                        .filter(|url| !url.is_empty())
+                    {
+                        state_guard
+                            .database
+                            .get_latest_activity_by_url(url)
+                            .ok()
+                            .flatten()
+                    } else if monitor::is_browser_app(&active_window.app_name)
+                        && !active_window.window_title.is_empty()
+                    {
+                        state_guard
+                            .database
+                            .get_latest_activity_by_app_title(
+                                &active_window.app_name,
+                                &active_window.window_title,
+                            )
+                            .ok()
+                            .flatten()
                     } else {
                         state_guard
                             .database
@@ -362,20 +423,17 @@ async fn background_screenshot_task(state: Arc<Mutex<AppState>>, window: tauri::
                 let is_merge = if let Some(ref latest) = latest_activity {
                     let mut merge = active_window.app_name != "Unknown"
                         && (current_timestamp - latest.timestamp) <= MERGE_GAP_SECS;
-                        
+
                     // 如果由于某种原因 browser_url 获取失败，但它确实是一个浏览器
                     // 我们必须强制让 window_title 完全相同才能合并，否则不同标签页的切换会被死死合并成一条记录。
-                    if merge && active_window.browser_url.is_none() {
-                        let lower_name = active_window.app_name.to_lowercase();
-                        let is_browser = lower_name.contains("chrome") || lower_name.contains("msedge") 
-                            || lower_name.contains("safari") || lower_name.contains("firefox")
-                            || lower_name.contains("browser") || lower_name.contains("explorer");
-                        
-                        if is_browser && latest.window_title != active_window.window_title {
-                            merge = false;
-                        }
+                    if merge
+                        && active_window.browser_url.is_none()
+                        && monitor::is_browser_app(&active_window.app_name)
+                        && latest.window_title != active_window.window_title
+                    {
+                        merge = false;
                     }
-                    
+
                     merge
                 } else {
                     false
@@ -396,8 +454,10 @@ async fn background_screenshot_task(state: Arc<Mutex<AppState>>, window: tauri::
                     // 只有键鼠超时时才检查屏幕变化，避免正常使用时的额外计算
                     let is_confirmed_idle = if input_idle {
                         if let Ok(ref screenshot) = screenshot_result {
-                            let hash = screenshot::ScreenshotService::calculate_image_hash(&screenshot.path)
-                                .unwrap_or(0);
+                            let hash = screenshot::ScreenshotService::calculate_image_hash(
+                                &screenshot.path,
+                            )
+                            .unwrap_or(0);
                             idle_detector.confirm_idle_with_hash(hash)
                         } else {
                             false
@@ -493,9 +553,7 @@ async fn background_screenshot_task(state: Arc<Mutex<AppState>>, window: tauri::
 
                             if should_ocr {
                                 let ocr_service = ocr::OcrService::new(&data_dir_clone);
-                                if let Ok(Some(ocr_result)) =
-                                    ocr_service.extract_text(&temp_path)
-                                {
+                                if let Ok(Some(ocr_result)) = ocr_service.extract_text(&temp_path) {
                                     if !ocr_result.text.is_empty() {
                                         let filtered_text =
                                             ocr::filter_sensitive_text(&ocr_result.text);
@@ -542,8 +600,10 @@ async fn background_screenshot_task(state: Arc<Mutex<AppState>>, window: tauri::
                         Ok(screenshot_result) => {
                             // ===== 空闲检测第二阶段：截图哈希确认 =====
                             let is_confirmed_idle = if input_idle {
-                                let hash = screenshot::ScreenshotService::calculate_image_hash(&screenshot_result.path)
-                                    .unwrap_or(0);
+                                let hash = screenshot::ScreenshotService::calculate_image_hash(
+                                    &screenshot_result.path,
+                                )
+                                .unwrap_or(0);
                                 idle_detector.confirm_idle_with_hash(hash)
                             } else {
                                 idle_detector.reset();
@@ -607,15 +667,11 @@ async fn background_screenshot_task(state: Arc<Mutex<AppState>>, window: tauri::
                                             }
                                         };
 
-                                        tokio::time::sleep(
-                                            tokio::time::Duration::from_secs(1),
-                                        )
-                                        .await;
+                                        tokio::time::sleep(tokio::time::Duration::from_secs(1))
+                                            .await;
 
-                                        let full_path =
-                                            data_dir_clone.join(&screenshot_path_clone);
-                                        let ocr_service =
-                                            ocr::OcrService::new(&data_dir_clone);
+                                        let full_path = data_dir_clone.join(&screenshot_path_clone);
+                                        let ocr_service = ocr::OcrService::new(&data_dir_clone);
 
                                         if let Ok(Some(ocr_result)) =
                                             ocr_service.extract_text(&full_path)
@@ -672,7 +728,9 @@ async fn background_screenshot_task(state: Arc<Mutex<AppState>>, window: tauri::
             // 隐私检查
             let ow_privacy = {
                 let state_guard = state.lock().unwrap_or_else(|e| e.into_inner());
-                state_guard.privacy_filter.check_privacy(&ow.app_name, &ow.window_title)
+                state_guard
+                    .privacy_filter
+                    .check_privacy(&ow.app_name, &ow.window_title)
             };
 
             if ow_privacy == privacy::PrivacyAction::Skip {
@@ -687,13 +745,16 @@ async fn background_screenshot_task(state: Arc<Mutex<AppState>>, window: tauri::
             // 查找该应用的最近活动记录，尝试合并
             let latest = {
                 let state_guard = state.lock().unwrap_or_else(|e| e.into_inner());
-                state_guard.database.get_latest_activity_by_app(&ow.app_name).ok().flatten()
+                state_guard
+                    .database
+                    .get_latest_activity_by_app(&ow.app_name)
+                    .ok()
+                    .flatten()
             };
 
             const OW_MERGE_GAP_SECS: i64 = 600;
             let can_merge = if let Some(ref act) = latest {
-                ow.app_name != "Unknown"
-                    && (current_ts - act.timestamp) <= OW_MERGE_GAP_SECS
+                ow.app_name != "Unknown" && (current_ts - act.timestamp) <= OW_MERGE_GAP_SECS
             } else {
                 false
             };
@@ -712,7 +773,10 @@ async fn background_screenshot_task(state: Arc<Mutex<AppState>>, window: tauri::
                         Ok(_) => {
                             log::info!(
                                 "🪟 浮动窗口合并: {} (id={}, +{}s, 总{}s)",
-                                ow.app_name, act_id, ow_duration, act.duration + ow_duration
+                                ow.app_name,
+                                act_id,
+                                ow_duration,
+                                act.duration + ow_duration
                             );
                         }
                         Err(e) => log::error!("浮动窗口合并失败: {e}"),
@@ -743,7 +807,9 @@ async fn background_screenshot_task(state: Arc<Mutex<AppState>>, window: tauri::
                     Ok(id) => {
                         log::info!(
                             "🪟 浮动窗口新建: {} (id={}, {}s)",
-                            ow.app_name, id, ow_duration
+                            ow.app_name,
+                            id,
+                            ow_duration
                         );
                     }
                     Err(e) => log::error!("浮动窗口记录失败: {e}"),
@@ -756,11 +822,7 @@ async fn background_screenshot_task(state: Arc<Mutex<AppState>>, window: tauri::
 /// 小时摘要生成任务
 /// 每小时检查一次，为上一个完整小时生成摘要
 /// 为指定日期和小时生成并保存摘要
-fn generate_and_save_summary(
-    state: &Arc<Mutex<AppState>>,
-    date: &str,
-    hour: i32,
-) {
+fn generate_and_save_summary(state: &Arc<Mutex<AppState>>, date: &str, hour: i32) {
     use analysis::hourly::{generate_fallback_summary, HourlyStats};
 
     let activities = {
@@ -782,8 +844,7 @@ fn generate_and_save_summary(
                 activity_count: stats.activity_count,
                 total_duration: stats.total_duration,
                 representative_screenshots: Some(
-                    serde_json::to_string(&stats.representative_screenshots)
-                        .unwrap_or_default(),
+                    serde_json::to_string(&stats.representative_screenshots).unwrap_or_default(),
                 ),
                 created_at: chrono::Local::now().timestamp(),
             };
@@ -921,7 +982,9 @@ async fn main() {
         // 1. 屏幕录制权限（截图功能必需）
         if !screenshot::has_screen_capture_permission() {
             log::warn!("⚠️  屏幕录制权限未授权，正在请求...");
-            log::warn!("   请在「系统设置 → 隐私与安全性 → 屏幕录制」中授权 Work Review，然后重启应用");
+            log::warn!(
+                "   请在「系统设置 → 隐私与安全性 → 屏幕录制」中授权 Work Review，然后重启应用"
+            );
             screenshot::request_screen_capture_permission();
         } else {
             log::info!("✅ 屏幕录制权限已授权");
@@ -990,7 +1053,7 @@ async fn main() {
         })
         .setup(|app| {
             let window = app.get_webview_window("main").unwrap();
-            
+
             // macOS 原生标题栏配置
             #[cfg(target_os = "macos")]
             {
@@ -1008,13 +1071,13 @@ async fn main() {
             let _state_for_tray = state.inner().clone(); // 预留
             let window_clone = window.clone();
             let window_for_tray = window.clone();
-            
+
             // 创建 Tauri v2 系统托盘
             let show = MenuItemBuilder::with_id("show", "显示窗口").build(app)?;
             let pause = MenuItemBuilder::with_id("pause", "暂停录制").build(app)?;
             let resume = MenuItemBuilder::with_id("resume", "恢复录制").build(app)?;
             let quit = MenuItemBuilder::with_id("quit", "退出").build(app)?;
-            
+
             let menu = MenuBuilder::new(app)
                 .item(&show)
                 .separator()
@@ -1023,44 +1086,47 @@ async fn main() {
                 .separator()
                 .item(&quit)
                 .build()?;
-            
+
             let _tray = TrayIconBuilder::new()
                 .icon(app.default_window_icon().unwrap().clone())
                 .menu(&menu)
-                .on_menu_event(move |app, event| {
-                    match event.id().as_ref() {
-                        "quit" => {
-                            std::process::exit(0);
-                        }
-                        "show" => {
-                            if let Some(window) = app.get_webview_window("main") {
-                                let _ = window.unminimize();
-                                let _ = window.show();
-                                let _ = window.set_focus();
-                            }
-                        }
-                        "pause" => {
-                            if let Some(state) = app.try_state::<Arc<Mutex<AppState>>>() {
-                                if let Ok(mut state) = state.lock() {
-                                    state.is_paused = true;
-                                    log::info!("录制已暂停");
-                                }
-                            }
-                        }
-                        "resume" => {
-                            if let Some(state) = app.try_state::<Arc<Mutex<AppState>>>() {
-                                if let Ok(mut state) = state.lock() {
-                                    state.is_paused = false;
-                                    log::info!("录制已恢复");
-                                }
-                            }
-                        }
-                        _ => {}
+                .on_menu_event(move |app, event| match event.id().as_ref() {
+                    "quit" => {
+                        std::process::exit(0);
                     }
+                    "show" => {
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.unminimize();
+                            let _ = window.show();
+                            let _ = window.set_focus();
+                        }
+                    }
+                    "pause" => {
+                        if let Some(state) = app.try_state::<Arc<Mutex<AppState>>>() {
+                            if let Ok(mut state) = state.lock() {
+                                state.is_paused = true;
+                                log::info!("录制已暂停");
+                            }
+                        }
+                    }
+                    "resume" => {
+                        if let Some(state) = app.try_state::<Arc<Mutex<AppState>>>() {
+                            if let Ok(mut state) = state.lock() {
+                                state.is_paused = false;
+                                log::info!("录制已恢复");
+                            }
+                        }
+                    }
+                    _ => {}
                 })
                 .on_tray_icon_event(move |_tray, event| {
                     // 处理托盘图标点击
-                    if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = event {
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
                         let _ = window_for_tray.unminimize();
                         let _ = window_for_tray.show();
                         let _ = window_for_tray.set_focus();
@@ -1136,7 +1202,9 @@ async fn main() {
             commands::resume_recording,
             commands::get_recording_state,
             commands::get_data_dir,
+            commands::check_github_update,
             commands::open_data_dir,
+            commands::download_and_install_github_update,
             commands::get_screenshot_thumbnail,
             commands::get_screenshot_full,
             commands::take_screenshot,
@@ -1168,7 +1236,10 @@ async fn main() {
         .run(|_app_handle, event| match event {
             // 处理 macOS Dock 点击：显示隐藏的窗口（仅 macOS）
             #[cfg(target_os = "macos")]
-            tauri::RunEvent::Reopen { has_visible_windows, .. } => {
+            tauri::RunEvent::Reopen {
+                has_visible_windows,
+                ..
+            } => {
                 if !has_visible_windows {
                     if let Some(window) = _app_handle.get_webview_window("main") {
                         let _ = window.unminimize();

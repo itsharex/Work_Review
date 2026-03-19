@@ -1,5 +1,5 @@
 use crate::error::{AppError, Result};
-use chrono::{Local, NaiveDateTime, TimeZone, MappedLocalTime};
+use chrono::{Local, MappedLocalTime, NaiveDateTime, TimeZone};
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -16,7 +16,8 @@ fn safe_local_timestamp(ndt: NaiveDateTime) -> i64 {
         MappedLocalTime::None => {
             // DST 跳变导致该本地时间不存在，向前偏移1小时
             let shifted = ndt + chrono::Duration::hours(1);
-            Local.from_local_datetime(&shifted)
+            Local
+                .from_local_datetime(&shifted)
                 .earliest()
                 .map(|dt| dt.timestamp())
                 .unwrap_or_else(|| ndt.and_utc().timestamp())
@@ -235,6 +236,12 @@ impl Database {
             AppError::Database(rusqlite::Error::InvalidParameterName(e.to_string()))
         })?;
 
+        let normalized_browser_url = activity
+            .browser_url
+            .as_deref()
+            .map(normalize_url)
+            .filter(|url| !url.is_empty());
+
         conn.execute(
             "INSERT INTO activities (timestamp, app_name, window_title, screenshot_path, ocr_text, category, duration, browser_url)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
@@ -246,7 +253,7 @@ impl Database {
                 activity.ocr_text,
                 activity.category,
                 activity.duration,
-                activity.browser_url,
+                normalized_browser_url,
             ],
         )?;
 
@@ -345,6 +352,49 @@ impl Database {
         )?;
 
         let mut rows = stmt.query(params![app_name, today_start])?;
+        if let Some(row) = rows.next()? {
+            Ok(Some(Activity {
+                id: Some(row.get(0)?),
+                timestamp: row.get(1)?,
+                app_name: row.get(2)?,
+                window_title: row.get(3)?,
+                screenshot_path: row.get(4)?,
+                ocr_text: row.get(5)?,
+                category: row.get(6)?,
+                duration: row.get(7)?,
+                browser_url: row.get(8)?,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// 获取指定应用 + 窗口标题今天的最近一条活动记录
+    /// 当浏览器 URL 暂时不可用时，用于避免不同标签页互相串时长
+    pub fn get_latest_activity_by_app_title(
+        &self,
+        app_name: &str,
+        window_title: &str,
+    ) -> Result<Option<Activity>> {
+        let conn = self.conn.lock().map_err(|e| {
+            AppError::Database(rusqlite::Error::InvalidParameterName(e.to_string()))
+        })?;
+
+        let today_start = {
+            let now = chrono::Local::now();
+            let ndt = now.date_naive().and_hms_opt(0, 0, 0).unwrap();
+            safe_local_timestamp(ndt)
+        };
+
+        let mut stmt = conn.prepare(
+            "SELECT id, timestamp, app_name, window_title, screenshot_path, ocr_text, category, duration, browser_url
+             FROM activities
+             WHERE app_name = ?1 AND window_title = ?2 AND timestamp >= ?3
+             ORDER BY id DESC
+             LIMIT 1"
+        )?;
+
+        let mut rows = stmt.query(params![app_name, window_title, today_start])?;
         if let Some(row) = rows.next()? {
             Ok(Some(Activity {
                 id: Some(row.get(0)?),
@@ -646,9 +696,7 @@ impl Database {
             }
         }
 
-        log::info!(
-            "清理重复记录: 删除 {total_deleted} 条，时长已合并到保留记录"
-        );
+        log::info!("清理重复记录: 删除 {total_deleted} 条，时长已合并到保留记录");
 
         Ok((total_deleted, all_paths))
     }
@@ -762,12 +810,12 @@ impl Database {
 
         // 计算各 URL 使用时长（按浏览器和URL分组）
         let mut browser_url_stmt = conn.prepare(
-            "SELECT app_name, browser_url, SUM(duration) as total_duration 
+            "SELECT app_name, RTRIM(browser_url, '/') as browser_url, SUM(duration) as total_duration 
              FROM activities 
              WHERE timestamp >= ?1 AND timestamp < ?2 
                AND browser_url IS NOT NULL AND browser_url != ''
                AND category = 'browser'
-             GROUP BY app_name, browser_url 
+             GROUP BY app_name, RTRIM(browser_url, '/') 
              ORDER BY app_name, total_duration DESC",
         )?;
 
@@ -854,10 +902,10 @@ impl Database {
 
         // 兼容旧的 url_usage 和 domain_usage（保持向后兼容）
         let mut url_stmt = conn.prepare(
-            "SELECT browser_url, SUM(duration) as total_duration 
+            "SELECT RTRIM(browser_url, '/') as browser_url, SUM(duration) as total_duration 
              FROM activities 
              WHERE timestamp >= ?1 AND timestamp < ?2 AND browser_url IS NOT NULL AND browser_url != ''
-             GROUP BY browser_url 
+             GROUP BY RTRIM(browser_url, '/') 
              ORDER BY total_duration DESC
              LIMIT 10"
         )?;
@@ -938,23 +986,51 @@ impl Database {
         let limit_val = limit.unwrap_or(1000);
         let offset_val = offset.unwrap_or(0);
 
-        // 使用 GROUP BY 聚合，按 app_name + browser_url 分组
-        // 确保同一应用（或同一 URL）只返回一条记录
         let mut stmt = conn.prepare(
-            "SELECT 
-                MAX(id) as id,
-                MAX(timestamp) as timestamp,
+            "WITH ranked AS (
+                SELECT
+                    id,
+                    timestamp,
+                    app_name,
+                    window_title,
+                    screenshot_path,
+                    ocr_text,
+                    category,
+                    duration,
+                    COALESCE(RTRIM(browser_url, '/'), '') as browser_url,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY
+                            app_name,
+                            CASE
+                                WHEN browser_url IS NOT NULL AND browser_url != '' THEN RTRIM(browser_url, '/')
+                                ELSE window_title
+                            END
+                        ORDER BY timestamp DESC, id DESC
+                    ) as rn,
+                    SUM(duration) OVER (
+                        PARTITION BY
+                            app_name,
+                            CASE
+                                WHEN browser_url IS NOT NULL AND browser_url != '' THEN RTRIM(browser_url, '/')
+                                ELSE window_title
+                            END
+                    ) as total_duration
+                FROM activities
+                WHERE timestamp >= ?1 AND timestamp < ?2
+             )
+             SELECT
+                id,
+                timestamp,
                 app_name,
-                MAX(window_title) as window_title,
-                MAX(screenshot_path) as screenshot_path,
-                MAX(ocr_text) as ocr_text,
-                MAX(category) as category,
-                SUM(duration) as duration,
-                COALESCE(browser_url, '') as browser_url
-             FROM activities 
-             WHERE timestamp >= ?1 AND timestamp < ?2 
-             GROUP BY app_name, COALESCE(browser_url, '')
-             ORDER BY MAX(timestamp) DESC
+                window_title,
+                screenshot_path,
+                ocr_text,
+                category,
+                total_duration,
+                browser_url
+             FROM ranked
+             WHERE rn = 1
+             ORDER BY timestamp DESC, id DESC
              LIMIT ?3 OFFSET ?4",
         )?;
 
@@ -1190,5 +1266,86 @@ impl Database {
             .collect();
 
         Ok(apps)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Activity, Database};
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_db_path(name: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        std::env::temp_dir().join(format!("work-review-{name}-{unique}.db"))
+    }
+
+    #[test]
+    fn 时间线应使用最新记录详情并累计分组时长() {
+        let db_path = temp_db_path("timeline");
+        let db = Database::new(&db_path).expect("创建测试数据库失败");
+        let now = chrono::Local::now().timestamp();
+        let date = chrono::Local::now().format("%Y-%m-%d").to_string();
+
+        let records = vec![
+            Activity {
+                id: None,
+                timestamp: now - 30,
+                app_name: "Code".to_string(),
+                window_title: "文件A".to_string(),
+                screenshot_path: "shot-a.jpg".to_string(),
+                ocr_text: Some("old".to_string()),
+                category: "development".to_string(),
+                duration: 10,
+                browser_url: None,
+            },
+            Activity {
+                id: None,
+                timestamp: now - 10,
+                app_name: "Code".to_string(),
+                window_title: "文件A".to_string(),
+                screenshot_path: "shot-b.jpg".to_string(),
+                ocr_text: Some("new".to_string()),
+                category: "development".to_string(),
+                duration: 25,
+                browser_url: None,
+            },
+            Activity {
+                id: None,
+                timestamp: now - 5,
+                app_name: "Code".to_string(),
+                window_title: "文件B".to_string(),
+                screenshot_path: "shot-c.jpg".to_string(),
+                ocr_text: None,
+                category: "development".to_string(),
+                duration: 15,
+                browser_url: None,
+            },
+        ];
+
+        for activity in &records {
+            db.insert_activity(activity).expect("插入测试数据失败");
+        }
+
+        let timeline = db.get_timeline(&date, None, None).expect("读取时间线失败");
+        let file_a = timeline
+            .iter()
+            .find(|activity| activity.window_title == "文件A")
+            .expect("未找到文件A记录");
+        let file_b = timeline
+            .iter()
+            .find(|activity| activity.window_title == "文件B")
+            .expect("未找到文件B记录");
+
+        assert_eq!(timeline.len(), 2);
+        assert_eq!(file_a.duration, 35);
+        assert_eq!(file_a.screenshot_path, "shot-b.jpg");
+        assert_eq!(file_a.ocr_text.as_deref(), Some("new"));
+        assert_eq!(file_b.duration, 15);
+
+        let _ = std::fs::remove_file(db_path);
     }
 }

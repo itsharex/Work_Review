@@ -135,7 +135,13 @@ impl ScreenshotService {
         // 先尝试 Windows Graphics Capture API
         match self.capture_with_wgc(&screenshots_dir, &time_str) {
             Ok(result) => {
-                return self.process_and_save_image(&result.0, &final_jpg, result.1, result.2, now.timestamp());
+                return self.process_and_save_image(
+                    &result.0,
+                    &final_jpg,
+                    result.1,
+                    result.2,
+                    now.timestamp(),
+                );
             }
             Err(e) => {
                 log::warn!("Windows Graphics Capture 失败: {e}，降级到 GDI 模式");
@@ -147,13 +153,17 @@ impl ScreenshotService {
             Ok((pixels, width, height)) => {
                 self.save_rgba_to_jpeg(&pixels, width, height, &final_jpg, now.timestamp())
             }
-            Err(e) => Err(AppError::Screenshot(format!("GDI 截图也失败: {e}")))
+            Err(e) => Err(AppError::Screenshot(format!("GDI 截图也失败: {e}"))),
         }
     }
 
     /// 使用 Windows Graphics Capture API 截屏
     #[cfg(target_os = "windows")]
-    fn capture_with_wgc(&self, screenshots_dir: &Path, time_str: &str) -> Result<(PathBuf, u32, u32)> {
+    fn capture_with_wgc(
+        &self,
+        screenshots_dir: &Path,
+        time_str: &str,
+    ) -> Result<(PathBuf, u32, u32)> {
         use std::sync::{
             atomic::{AtomicBool, Ordering},
             Arc, Mutex,
@@ -275,7 +285,9 @@ impl ScreenshotService {
             log::debug!("WithoutBorder 失败: {first_err}，尝试 WithBorder");
 
             {
-                let mut r = result.lock().map_err(|_| AppError::Screenshot("锁错误".to_string()))?;
+                let mut r = result
+                    .lock()
+                    .map_err(|_| AppError::Screenshot("锁错误".to_string()))?;
                 r.success = false;
                 r.error = None;
             }
@@ -306,7 +318,9 @@ impl ScreenshotService {
         }
 
         let (success, error_msg, width, height) = {
-            let r = result.lock().map_err(|_| AppError::Screenshot("锁错误".to_string()))?;
+            let r = result
+                .lock()
+                .map_err(|_| AppError::Screenshot("锁错误".to_string()))?;
             (r.success, r.error.clone(), r.width, r.height)
         };
 
@@ -323,9 +337,8 @@ impl ScreenshotService {
     fn capture_with_gdi(&self) -> Result<(Vec<u8>, u32, u32)> {
         use std::ptr::null_mut;
         use winapi::um::wingdi::{
-            BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject,
-            GetDIBits, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
-            SRCCOPY,
+            BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDIBits,
+            SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, SRCCOPY,
         };
         use winapi::um::winuser::{GetDC, GetSystemMetrics, ReleaseDC, SM_CXSCREEN, SM_CYSCREEN};
 
@@ -365,10 +378,13 @@ impl ScreenshotService {
             // 复制屏幕内容
             let blt_result = BitBlt(
                 mem_dc,
-                0, 0,
-                width as i32, height as i32,
+                0,
+                0,
+                width as i32,
+                height as i32,
                 screen_dc,
-                0, 0,
+                0,
+                0,
                 SRCCOPY,
             );
 
@@ -447,7 +463,8 @@ impl ScreenshotService {
         if orig_width > self.config.max_width {
             let scale = self.config.max_width as f32 / orig_width as f32;
             let new_height = (orig_height as f32 * scale) as u32;
-            dynamic_image = dynamic_image.resize(self.config.max_width, new_height, FilterType::Lanczos3);
+            dynamic_image =
+                dynamic_image.resize(self.config.max_width, new_height, FilterType::Lanczos3);
         }
 
         let final_width = dynamic_image.width();
@@ -506,7 +523,8 @@ impl ScreenshotService {
         if width > self.config.max_width {
             let scale = self.config.max_width as f32 / width as f32;
             let new_height = (height as f32 * scale) as u32;
-            dynamic_image = dynamic_image.resize(self.config.max_width, new_height, FilterType::Lanczos3);
+            dynamic_image =
+                dynamic_image.resize(self.config.max_width, new_height, FilterType::Lanczos3);
         }
 
         let final_width = dynamic_image.width();

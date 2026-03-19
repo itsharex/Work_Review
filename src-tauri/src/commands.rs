@@ -3,9 +3,13 @@ use crate::database::{Activity, DailyReport, DailyStats};
 use crate::error::AppError;
 use crate::AppState;
 use serde::{Deserialize, Serialize};
+use std::cmp::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tauri::State;
+
+const GITHUB_LATEST_RELEASE_API: &str =
+    "https://api.github.com/repos/wm94i/Work_Review/releases/latest";
 
 /// 模型测试结果
 #[derive(Serialize, Deserialize, Debug)]
@@ -14,6 +18,145 @@ pub struct ModelTestResult {
     pub message: String,
     pub response_time_ms: u64,
     pub model_info: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct GithubUpdateInfo {
+    pub current_version: String,
+    pub latest_version: String,
+    pub available: bool,
+    pub asset_name: Option<String>,
+    pub download_url: Option<String>,
+    pub body: Option<String>,
+}
+
+#[derive(Deserialize, Debug)]
+struct GithubReleaseResponse {
+    tag_name: String,
+    body: Option<String>,
+    assets: Vec<GithubReleaseAsset>,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+struct GithubReleaseAsset {
+    name: String,
+    browser_download_url: String,
+}
+
+fn normalize_version(version: &str) -> &str {
+    version.trim().trim_start_matches(['v', 'V'])
+}
+
+fn parse_version_parts(version: &str) -> Vec<u64> {
+    normalize_version(version)
+        .split('.')
+        .map(|segment| {
+            segment
+                .chars()
+                .take_while(|c| c.is_ascii_digit())
+                .collect::<String>()
+                .parse::<u64>()
+                .unwrap_or(0)
+        })
+        .collect()
+}
+
+fn compare_versions(current: &str, latest: &str) -> Ordering {
+    let current_parts = parse_version_parts(current);
+    let latest_parts = parse_version_parts(latest);
+    let max_len = current_parts.len().max(latest_parts.len());
+
+    for index in 0..max_len {
+        let current_value = *current_parts.get(index).unwrap_or(&0);
+        let latest_value = *latest_parts.get(index).unwrap_or(&0);
+        match current_value.cmp(&latest_value) {
+            Ordering::Equal => continue,
+            other => return other,
+        }
+    }
+
+    Ordering::Equal
+}
+
+#[cfg(target_os = "windows")]
+fn current_arch_aliases() -> &'static [&'static str] {
+    match std::env::consts::ARCH {
+        "x86_64" => &["x64", "x86_64", "amd64"],
+        "aarch64" => &["arm64", "aarch64"],
+        "x86" => &["x86", "i686", "ia32"],
+        _ => &[],
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn pick_release_asset(assets: &[GithubReleaseAsset]) -> Option<GithubReleaseAsset> {
+    let arch_aliases = current_arch_aliases();
+    let matches_arch = |name: &str| {
+        arch_aliases.is_empty()
+            || arch_aliases
+                .iter()
+                .any(|alias| name.contains(alias) || name.contains(&alias.replace('_', "-")))
+    };
+
+    assets
+        .iter()
+        .filter(|asset| {
+            let lower_name = asset.name.to_lowercase();
+            lower_name.ends_with(".exe")
+                && !lower_name.ends_with(".sig")
+                && !lower_name.ends_with(".exe.zip")
+                && (lower_name.contains("setup") || lower_name.contains("installer"))
+        })
+        .find(|asset| matches_arch(&asset.name.to_lowercase()))
+        .cloned()
+        .or_else(|| {
+            assets
+                .iter()
+                .find(|asset| {
+                    let lower_name = asset.name.to_lowercase();
+                    lower_name.ends_with(".exe")
+                        && !lower_name.ends_with(".sig")
+                        && !lower_name.ends_with(".exe.zip")
+                })
+                .cloned()
+        })
+}
+
+#[cfg(target_os = "macos")]
+fn pick_release_asset(assets: &[GithubReleaseAsset]) -> Option<GithubReleaseAsset> {
+    assets
+        .iter()
+        .find(|asset| {
+            let lower_name = asset.name.to_lowercase();
+            (lower_name.ends_with(".app.tar.gz") || lower_name.ends_with(".dmg"))
+                && !lower_name.ends_with(".sig")
+        })
+        .cloned()
+}
+
+#[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+fn pick_release_asset(assets: &[GithubReleaseAsset]) -> Option<GithubReleaseAsset> {
+    assets
+        .iter()
+        .find(|asset| {
+            let lower_name = asset.name.to_lowercase();
+            (lower_name.ends_with(".appimage")
+                || lower_name.ends_with(".deb")
+                || lower_name.ends_with(".rpm"))
+                && !lower_name.ends_with(".sig")
+        })
+        .cloned()
+}
+
+#[cfg(target_os = "windows")]
+fn sanitize_filename(name: &str) -> String {
+    name.chars()
+        .map(|ch| match ch {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+            _ => ch,
+        })
+        .collect()
 }
 
 /// 获取今日统计
@@ -63,11 +206,11 @@ pub async fn get_today_stats(
 
         // 过滤 browser_usage
         stats.browser_usage.retain(|b| {
-                let browser_lower = b.browser_name.to_lowercase();
-                !ignored_apps.iter().any(|ignored| {
-                    browser_lower.contains(ignored) || ignored.contains(&browser_lower)
-                })
-            });
+            let browser_lower = b.browser_name.to_lowercase();
+            !ignored_apps
+                .iter()
+                .any(|ignored| browser_lower.contains(ignored) || ignored.contains(&browser_lower))
+        });
 
         // 重新计算浏览器时长
         stats.browser_duration = stats.browser_usage.iter().map(|b| b.duration).sum();
@@ -137,9 +280,7 @@ pub async fn get_timeline(
         return Ok(activities);
     }
 
-    log::info!(
-        "隐私过滤: 需过滤应用 {ignored_apps:?}, 域名 {excluded_domains:?}"
-    );
+    log::info!("隐私过滤: 需过滤应用 {ignored_apps:?}, 域名 {excluded_domains:?}");
     let original_count = activities.len();
     let filtered: Vec<_> = activities
         .into_iter()
@@ -707,6 +848,56 @@ pub async fn get_data_dir(state: State<'_, Arc<Mutex<AppState>>>) -> Result<Stri
     Ok(state.data_dir.to_string_lossy().to_string())
 }
 
+/// 基于 GitHub Release 检查更新。
+/// 当 Tauri updater 依赖的 latest.json 缺失或暂时不可用时，前端会回退到这里。
+#[tauri::command]
+pub async fn check_github_update() -> Result<GithubUpdateInfo, AppError> {
+    let current_version = env!("CARGO_PKG_VERSION").to_string();
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(20))
+        .connect_timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|e| AppError::Unknown(format!("创建更新检查客户端失败: {e}")))?;
+
+    let release = client
+        .get(GITHUB_LATEST_RELEASE_API)
+        .header(reqwest::header::USER_AGENT, "WorkReview-Updater")
+        .header(reqwest::header::ACCEPT, "application/vnd.github+json")
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<GithubReleaseResponse>()
+        .await?;
+
+    let latest_version = normalize_version(&release.tag_name).to_string();
+    let has_update = compare_versions(&current_version, &latest_version) == Ordering::Less;
+
+    if !has_update {
+        return Ok(GithubUpdateInfo {
+            current_version,
+            latest_version,
+            available: false,
+            asset_name: None,
+            download_url: None,
+            body: release.body,
+        });
+    }
+
+    let asset = pick_release_asset(&release.assets).ok_or_else(|| {
+        AppError::Unknown("发现了新版本，但没有找到当前平台可直接安装的更新包".to_string())
+    })?;
+
+    Ok(GithubUpdateInfo {
+        current_version,
+        latest_version,
+        available: true,
+        asset_name: Some(asset.name),
+        download_url: Some(asset.browser_download_url),
+        body: release.body,
+    })
+}
+
 /// 在系统文件管理器中打开数据目录
 /// plugin-shell 的 open 对本地路径在部分平台不可靠，改用系统命令直接打开
 #[tauri::command]
@@ -749,6 +940,61 @@ pub async fn open_data_dir(state: State<'_, Arc<Mutex<AppState>>>) -> Result<(),
     Ok(())
 }
 
+/// GitHub Release 后备自动更新。
+/// 目前主要用于 Windows：下载 setup.exe 后静默安装并替换旧版本。
+#[tauri::command]
+pub async fn download_and_install_github_update(
+    download_url: String,
+    asset_name: String,
+) -> Result<(), AppError> {
+    #[cfg(target_os = "windows")]
+    {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(15 * 60))
+            .connect_timeout(Duration::from_secs(15))
+            .build()
+            .map_err(|e| AppError::Unknown(format!("创建下载客户端失败: {e}")))?;
+
+        let response = client
+            .get(&download_url)
+            .header(reqwest::header::USER_AGENT, "WorkReview-Updater")
+            .send()
+            .await?
+            .error_for_status()?;
+
+        let bytes = response.bytes().await?;
+        let temp_dir = std::env::temp_dir().join("workreview-updates");
+        std::fs::create_dir_all(&temp_dir)
+            .map_err(|e| AppError::Unknown(format!("创建更新临时目录失败: {e}")))?;
+
+        let file_name = format!(
+            "{}-{}",
+            chrono::Utc::now().timestamp(),
+            sanitize_filename(&asset_name)
+        );
+        let installer_path = temp_dir.join(file_name);
+
+        std::fs::write(&installer_path, &bytes)
+            .map_err(|e| AppError::Unknown(format!("写入更新安装包失败: {e}")))?;
+
+        std::process::Command::new(&installer_path)
+            .args(["/S", "/R", "/UPDATE"])
+            .spawn()
+            .map_err(|e| AppError::Unknown(format!("启动更新安装程序失败: {e}")))?;
+
+        std::process::exit(0);
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = download_url;
+        let _ = asset_name;
+        Err(AppError::Unknown(
+            "GitHub 后备自动更新当前仅对 Windows 安装包启用".to_string(),
+        ))
+    }
+}
+
 /// 获取截图缩略图
 #[tauri::command]
 pub async fn get_screenshot_thumbnail(
@@ -785,9 +1031,11 @@ pub async fn take_screenshot(state: State<'_, Arc<Mutex<AppState>>>) -> Result<A
         let active_window = crate::monitor::get_active_window()?;
 
         // 检查隐私过滤
-        if state
-            .privacy_filter
-            .should_skip(&active_window.app_name, &active_window.window_title)
+        if state.privacy_filter.check_privacy_full(
+            &active_window.app_name,
+            &active_window.window_title,
+            active_window.browser_url.as_deref(),
+        ) == crate::privacy::PrivacyAction::Skip
         {
             return Err(AppError::Privacy("当前窗口被隐私规则过滤".to_string()));
         }
@@ -795,7 +1043,8 @@ pub async fn take_screenshot(state: State<'_, Arc<Mutex<AppState>>>) -> Result<A
         // 执行截屏
         let result = state.screenshot_service.capture()?;
         let relative_path = state.screenshot_service.get_relative_path(&result.path);
-        let category = crate::monitor::categorize_app(&active_window.app_name, &active_window.window_title);
+        let category =
+            crate::monitor::categorize_app(&active_window.app_name, &active_window.window_title);
 
         (
             result,
@@ -1205,6 +1454,7 @@ pub async fn get_ocr_install_guide() -> Result<serde_json::Value, AppError> {
 /// 设置 Dock 图标可见性 (仅 macOS)
 #[tauri::command]
 #[allow(unused_variables)]
+#[allow(unexpected_cfgs)]
 pub fn set_dock_visibility(visible: bool) -> Result<(), AppError> {
     #[cfg(target_os = "macos")]
     {
@@ -1234,7 +1484,8 @@ pub fn set_dock_visibility(visible: bool) -> Result<(), AppError> {
                 let path_to_use = if resource != nil {
                     resource
                 } else {
-                    NSString::alloc(nil).init_str("/Applications/Work Review.app/Contents/Resources/icon.icns")
+                    NSString::alloc(nil)
+                        .init_str("/Applications/Work Review.app/Contents/Resources/icon.icns")
                 };
 
                 let image: *mut Object = NSImage::alloc(nil).initByReferencingFile_(path_to_use);
@@ -1592,7 +1843,13 @@ if ($app -and $app.Path) {{
     );
 
     let output = Command::new("powershell")
-        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &ps_script])
+        .args([
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            &ps_script,
+        ])
         .creation_flags(CREATE_NO_WINDOW)
         .output()
         .map_err(|e| AppError::Unknown(format!("执行 PowerShell 失败: {e}")))?;
@@ -1627,11 +1884,8 @@ pub async fn save_background_image(
     };
 
     // 解码 base64
-    let image_bytes = base64::Engine::decode(
-        &base64::engine::general_purpose::STANDARD,
-        &data,
-    )
-    .map_err(|e| AppError::Unknown(format!("base64 解码失败: {e}")))?;
+    let image_bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &data)
+        .map_err(|e| AppError::Unknown(format!("base64 解码失败: {e}")))?;
 
     // 保存为 JPEG（压缩体积）
     let img = image::load_from_memory(&image_bytes)
@@ -1676,8 +1930,8 @@ pub async fn get_background_image(
         return Ok(None);
     }
 
-    let bytes = std::fs::read(&bg_path)
-        .map_err(|e| AppError::Unknown(format!("读取背景图失败: {e}")))?;
+    let bytes =
+        std::fs::read(&bg_path).map_err(|e| AppError::Unknown(format!("读取背景图失败: {e}")))?;
     let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes);
     Ok(Some(b64))
 }

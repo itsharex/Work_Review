@@ -3,21 +3,25 @@
   import { invoke } from '@tauri-apps/api/core';
   import { open } from '@tauri-apps/plugin-shell';
   import { getVersion } from '@tauri-apps/api/app';
-
   import { check } from '@tauri-apps/plugin-updater';
   import { ask, message as showMessage } from '@tauri-apps/plugin-dialog';
   import { relaunch } from '@tauri-apps/plugin-process';
 
   let appVersion = '';
   let dataDir = '';
+  let currentPlatform = '';
   
   let isCheckingUpdate = false;
   let updateStatus = '';
+
+  const UPDATE_CHECK_TIMEOUT_MS = 8000;
+  const UPDATE_DOWNLOAD_TIMEOUT_MS = 5 * 60 * 1000;
 
   onMount(async () => {
     try {
       appVersion = await getVersion();
       dataDir = await invoke('get_data_dir');
+      currentPlatform = await invoke('get_platform');
     } catch (e) {
       console.error('初始化失败:', e);
       appVersion = '1.0.0';
@@ -27,6 +31,47 @@
   async function openGitHub() {
     // 使用正确的仓库名（大小写一致）
     await open('https://github.com/wm94i/Work_Review');
+  }
+
+  async function openLatestRelease() {
+    await open('https://github.com/wm94i/Work_Review/releases/latest');
+  }
+
+  function shouldUseGithubFallback(errorText) {
+    const lower = String(errorText).toLowerCase();
+    return (
+      lower.includes('latest.json') ||
+      lower.includes('could not fetch a valid release json') ||
+      lower.includes('error sending request for url') ||
+      lower.includes('download request failed with status: 404') ||
+      lower.includes('download request failed with status: 403')
+    );
+  }
+
+  async function runGithubFallbackUpdate() {
+    if (currentPlatform !== 'windows') {
+      return false;
+    }
+
+    const update = await invoke('check_github_update');
+
+    if (!update?.available) {
+      updateStatus = '当前已是最新版本';
+      setTimeout(() => updateStatus = '', 3000);
+      return true;
+    }
+
+    if (!update.downloadUrl || !update.assetName) {
+      throw new Error('未找到当前平台的安装包');
+    }
+
+    updateStatus = `发现新版本 ${update.latestVersion}，开始下载...`;
+    await invoke('download_and_install_github_update', {
+      downloadUrl: update.downloadUrl,
+      assetName: update.assetName
+    });
+
+    return true;
   }
 
   // 通过后端命令直接调用系统文件管理器打开数据目录
@@ -44,62 +89,92 @@
     if (isCheckingUpdate) return;
     
     isCheckingUpdate = true;
-    updateStatus = '正在检查...';
+    updateStatus = '正在检查更新...';
     
     try {
-      // 使用 Promise.race 添加15秒超时限制，防止国内网络访问 GitHub 卡死
-      const checkPromise = check();
-      const timeoutPromise = new Promise((_, reject) => {
-        setTimeout(() => reject(new Error('网络请求超时，无法连接至 GitHub 更新服务器')), 15000);
-      });
-      
-      const update = await Promise.race([checkPromise, timeoutPromise]);
+      // 将超时下沉到插件层，确保首个源超时后能继续尝试后备源
+      const update = await check({ timeout: UPDATE_CHECK_TIMEOUT_MS });
       
       if (update) {
-        updateStatus = `发现新版本: ${update.version}`;
-        
-        const yes = await ask(`发现新版本 ${update.version}，是否现在下载并安装？\n更新内容: ${update.body || '无内容'}`, { 
-          title: '软件更新',
-          kind: 'info'
-        });
-        
-        if (yes) {
-          updateStatus = '正在下载更新...';
-          let downloaded = 0;
-          let contentLength = 0;
-          const unlisten = await update.onEvent((event) => {
-            if (event.event === 'Started') {
-              contentLength = event.data.contentLength || 0;
-            } else if (event.event === 'Progress') {
-              downloaded += event.data.chunkLength;
-              if (contentLength > 0) {
-                const percent = Math.round((downloaded / contentLength) * 100);
-                updateStatus = `下载中 (${percent}%)`;
-              }
-            } else if (event.event === 'Finished') {
-              updateStatus = '下载完成，即将重启';
+        updateStatus = `发现新版本 ${update.version}，开始下载...`;
+        let downloaded = 0;
+        let contentLength = 0;
+
+        await update.downloadAndInstall((event) => {
+          if (event.event === 'Started') {
+            contentLength = event.data.contentLength || 0;
+          } else if (event.event === 'Progress') {
+            downloaded += event.data.chunkLength;
+            if (contentLength > 0) {
+              const percent = Math.min(
+                100,
+                Math.round((downloaded / contentLength) * 100)
+              );
+              updateStatus = `下载中 (${percent}%)`;
+            } else {
+              updateStatus = `下载中 (${Math.max(1, Math.round(downloaded / 1024 / 1024))} MB)`;
             }
-          });
-          
-          await update.downloadAndInstall();
-          unlisten();
-          await relaunch();
-        } else {
-          updateStatus = '';
-        }
+          } else if (event.event === 'Finished') {
+            updateStatus = '下载完成，正在安装...';
+          }
+        }, {
+          timeout: UPDATE_DOWNLOAD_TIMEOUT_MS
+        });
+
+        await update.close();
+        updateStatus = '安装完成，正在重启...';
+        await relaunch();
       } else {
         updateStatus = '当前已是最新版本';
         setTimeout(() => updateStatus = '', 3000);
-        // await showMessage('当前已是最新版本', { title: '检查更新', kind: 'info' }); // 不需要弹窗，安静显示文字即可
       }
     } catch (error) {
       console.error('检查更新失败:', error);
       
       const errMsg = String(error);
-      // 如果报错包含无法拉取 release JSON（通常因为远程仓库尚未发布 release/latest.json）
-      if (errMsg.includes('Could not fetch a valid release JSON')) {
-        updateStatus = '当前已是最新版本'; // 或者 '暂未发布更新'
-        // await showMessage('当前已是最新版本', { title: '检查更新', kind: 'info' });
+      if (shouldUseGithubFallback(errMsg)) {
+        try {
+          const handled = await runGithubFallbackUpdate();
+          if (handled) {
+            return;
+          }
+        } catch (fallbackError) {
+          console.error('GitHub 后备更新失败:', fallbackError);
+          updateStatus = '自动更新失败';
+          const openRelease = await ask(
+            '自动更新源暂时不可用。是否打开 Releases 页面手动下载最新版本？',
+            { title: '自动更新失败', kind: 'warning' }
+          );
+          if (openRelease) {
+            await openLatestRelease();
+          }
+          setTimeout(() => updateStatus = '', 3000);
+          return;
+        }
+      }
+
+      if (errMsg.includes('timeout') || errMsg.includes('timed out')) {
+        updateStatus = '检查更新超时';
+        const openRelease = await ask(
+          '检查更新超时。是否打开 Releases 页面手动下载最新版本？',
+          { title: '检查更新失败', kind: 'warning' }
+        );
+        if (openRelease) {
+          await openLatestRelease();
+        }
+      } else if (
+        errMsg.includes('Download request failed') ||
+        errMsg.includes('failed to download') ||
+        errMsg.includes('Network')
+      ) {
+        updateStatus = '下载更新失败';
+        const openRelease = await ask(
+          '更新包下载失败。是否打开 Releases 页面手动下载最新版本？',
+          { title: '下载更新失败', kind: 'warning' }
+        );
+        if (openRelease) {
+          await openLatestRelease();
+        }
       } else {
         updateStatus = '检查更新失败';
         await showMessage(`检查更新出现问题: ${errMsg}`, { title: '错误', kind: 'error' });
@@ -152,10 +227,10 @@
               <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
               <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
             </svg>
-            正在检查新版本...
+            正在更新...
           {:else}
             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
-            检查更新
+            立即更新
           {/if}
         </button>
         {#if updateStatus}

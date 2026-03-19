@@ -664,7 +664,8 @@ pub fn filter_sensitive_text(text: &str) -> String {
     }
 
     // 过滤银行卡号（要求独立出现的 16-19 位数字，或 4 位一组以空格/横线分隔）
-    if let Ok(re) = Regex::new(r"(?<!\d)\d{4}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{0,3}(?!\d)") {
+    if let Ok(re) = Regex::new(r"(?<!\d)\d{4}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{0,3}(?!\d)")
+    {
         result = re.replace_all(&result, "[银行卡号]").to_string();
     }
 

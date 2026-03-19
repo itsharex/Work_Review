@@ -367,10 +367,16 @@ impl Analyzer for SummaryAnalyzer {
         report.push_str("## 一、今日概览\n\n");
         report.push_str("| 指标 | 数值 |\n");
         report.push_str("|:--|--:|\n");
-        report.push_str(&format!("| 总工作时长 | {} |\n", format_duration(stats.total_duration)));
+        report.push_str(&format!(
+            "| 总工作时长 | {} |\n",
+            format_duration(stats.total_duration)
+        ));
         report.push_str(&format!("| 截图数量 | {} 张 |\n", stats.screenshot_count));
         report.push_str(&format!("| 使用应用数 | {} 个 |\n", stats.app_usage.len()));
-        report.push_str(&format!("| 访问网站数 | {} 个 |\n", stats.domain_usage.len()));
+        report.push_str(&format!(
+            "| 访问网站数 | {} 个 |\n",
+            stats.domain_usage.len()
+        ));
         report.push('\n');
 
         // ==================== 时间分配 ====================
@@ -447,11 +453,7 @@ impl Analyzer for SummaryAnalyzer {
             .join(", ");
 
         let keywords = self.extract_keywords(activities);
-        let top_keywords = keywords
-            .into_iter()
-            .take(8)
-            .collect::<Vec<_>>()
-            .join(", ");
+        let top_keywords = keywords.into_iter().take(8).collect::<Vec<_>>().join(", ");
 
         // 规整的 AI 提示词（站在共同度过工作一天的角度，深入分析数据）
         let prompt = format!(
@@ -494,9 +496,21 @@ impl Analyzer for SummaryAnalyzer {
 
 用1到2句话，像朋友一样总结今天，给予肯定和鼓励。"#,
             format_duration(stats.total_duration),
-            if apps_list.is_empty() { "无".to_string() } else { apps_list.clone() },
-            if urls_list.is_empty() { "无".to_string() } else { urls_list },
-            if top_keywords.is_empty() { "无".to_string() } else { top_keywords }
+            if apps_list.is_empty() {
+                "无".to_string()
+            } else {
+                apps_list.clone()
+            },
+            if urls_list.is_empty() {
+                "无".to_string()
+            } else {
+                urls_list
+            },
+            if top_keywords.is_empty() {
+                "无".to_string()
+            } else {
+                top_keywords
+            }
         );
 
         // 调用 AI

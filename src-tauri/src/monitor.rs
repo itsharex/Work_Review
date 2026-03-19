@@ -9,6 +9,97 @@ pub struct ActiveWindow {
     pub browser_url: Option<String>,
 }
 
+/// 判断进程名是否属于浏览器
+pub fn is_browser_app(app_name: &str) -> bool {
+    let app_lower = app_name.to_lowercase();
+    app_lower.contains("chrome")
+        || app_lower.contains("msedge")
+        || app_lower.contains("brave")
+        || app_lower.contains("opera")
+        || app_lower.contains("vivaldi")
+        || app_lower.contains("firefox")
+        || app_lower.contains("safari")
+        || app_lower.contains("arc")
+        || app_lower.contains("orion")
+        || app_lower.contains("zen browser")
+        || app_lower.contains("browser")
+        || app_lower.contains("360se")
+        || app_lower.contains("360chrome")
+        || app_lower.contains("qqbrowser")
+        || app_lower.contains("sogouexplorer")
+        || app_lower.contains("2345explorer")
+        || app_lower.contains("liebao")
+        || app_lower.contains("maxthon")
+        || app_lower.contains("theworld")
+        || app_lower.contains("cent")
+        || app_lower.contains("iexplore")
+}
+
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn is_probable_domain(value: &str) -> bool {
+    let candidate = value.trim().trim_matches('/').to_lowercase();
+    if candidate.is_empty()
+        || candidate.contains(' ')
+        || candidate.starts_with('.')
+        || candidate.ends_with('.')
+        || !candidate.contains('.')
+    {
+        return false;
+    }
+
+    let labels: Vec<&str> = candidate.split('.').collect();
+    if labels.len() < 2 {
+        return false;
+    }
+
+    let tld = labels.last().copied().unwrap_or_default();
+    if tld.len() < 2 || !tld.chars().all(|c| c.is_ascii_alphabetic()) {
+        return false;
+    }
+
+    labels.iter().all(|label| {
+        !label.is_empty()
+            && !label.starts_with('-')
+            && !label.ends_with('-')
+            && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+    })
+}
+
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn normalize_possible_url(value: &str) -> Option<String> {
+    let candidate = value
+        .trim()
+        .trim_matches(|c: char| c.is_control() || c == '\u{200b}' || c == '\u{feff}');
+
+    if candidate.is_empty() {
+        return None;
+    }
+
+    if candidate.contains(' ') {
+        return None;
+    }
+
+    let candidate_lower = candidate.to_lowercase();
+    if candidate_lower.starts_with("http://") || candidate_lower.starts_with("https://") {
+        return Some(candidate.to_string());
+    }
+
+    if candidate.contains("://")
+        || candidate_lower.starts_with("about:")
+        || candidate_lower.starts_with("chrome:")
+        || candidate_lower.starts_with("edge:")
+        || candidate_lower.starts_with("file:")
+    {
+        return Some(candidate.to_string());
+    }
+
+    if is_probable_domain(candidate) {
+        return Some(format!("https://{}", candidate.trim_end_matches('/')));
+    }
+
+    None
+}
+
 /// 获取当前活动窗口信息
 #[cfg(target_os = "windows")]
 pub fn get_active_window() -> Result<ActiveWindow> {
@@ -171,197 +262,129 @@ fn get_process_name_by_image(pid: u32) -> Option<String> {
 
 /// 从窗口获取浏览器 URL (Windows)
 /// 使用原生 UI Automation COM 接口（通过 uiautomation crate），不再 spawn PowerShell 进程
-/// 多条目缓存避免重复查询，标题归一化提高缓存命中率
+/// 为避免串号，不缓存正向结果，优先保证 URL 与时长归属的准确性
 #[cfg(target_os = "windows")]
 fn get_browser_url_windows(app_name: &str, window_title: &str, hwnd: isize) -> Option<String> {
-    use std::collections::HashMap;
-    use std::sync::Mutex;
-    use std::time::Instant;
-
-    struct UrlCacheEntry {
-        url: Option<String>,
-        fetch_time: Instant,
-    }
-
-    // 多条目缓存：key = "app_name|normalized_title"，最多 32 条
-    static URL_CACHE: std::sync::LazyLock<Mutex<HashMap<String, UrlCacheEntry>>> =
-        std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
-
-    const CACHE_TTL_SECS: u64 = 30;
-    const CACHE_MAX_ENTRIES: usize = 32;
-
-    // 标题归一化：去除 (N) / [N] 通知计数前缀，提高缓存命中率
-    let normalized_title = normalize_browser_title(window_title);
-    let cache_key = format!("{}|{}", app_name, normalized_title);
-
-    // 检查缓存
-    if let Ok(cache) = URL_CACHE.lock() {
-        if let Some(entry) = cache.get(&cache_key) {
-            if entry.fetch_time.elapsed().as_secs() < CACHE_TTL_SECS {
-                return entry.url.clone();
-            }
-        }
-    }
-
-    let app_lower = app_name.to_lowercase();
-
-    // 检查是否为浏览器进程（包括国产浏览器）
-    let is_browser = app_lower.contains("chrome")
-        || app_lower.contains("msedge")
-        || app_lower.contains("brave")
-        || app_lower.contains("opera")
-        || app_lower.contains("vivaldi")
-        || app_lower.contains("firefox")
-        || app_lower.contains("360se")
-        || app_lower.contains("360chrome")
-        || app_lower.contains("qqbrowser")
-        || app_lower.contains("sogouexplorer")
-        || app_lower.contains("2345explorer")
-        || app_lower.contains("liebao")
-        || app_lower.contains("maxthon")
-        || app_lower.contains("theworld")
-        || app_lower.contains("cent")
-        || app_lower.contains("iexplore");
-
-    if !is_browser {
+    if !is_browser_app(app_name) {
         return None;
     }
 
     // 使用原生 UI Automation 获取 URL，catch_unwind 防止 COM 异常导致崩溃
-    let result = std::panic::catch_unwind(|| get_url_via_uiautomation(hwnd))
-        .unwrap_or(None);
+    let result = std::panic::catch_unwind(|| get_url_via_uiautomation(hwnd)).unwrap_or(None);
 
     // UI Automation 失败时，尝试从窗口标题提取域名信息作为兜底
-    let result = result.or_else(|| extract_url_from_title(window_title));
-
-    // 更新缓存
-    if let Ok(mut cache) = URL_CACHE.lock() {
-        // 容量满时淘汰最旧的条目
-        if cache.len() >= CACHE_MAX_ENTRIES {
-            if let Some(oldest_key) = cache
-                .iter()
-                .min_by_key(|(_, v)| v.fetch_time)
-                .map(|(k, _)| k.clone())
-            {
-                cache.remove(&oldest_key);
-            }
-        }
-        cache.insert(
-            cache_key,
-            UrlCacheEntry {
-                url: result.clone(),
-                fetch_time: Instant::now(),
-            },
-        );
-    }
-
-    result
-}
-
-/// 归一化浏览器窗口标题：去除通知计数前缀 (N) / [N]
-/// 例如 "(3) Gmail - Inbox" → "Gmail - Inbox"
-#[cfg(target_os = "windows")]
-fn normalize_browser_title(title: &str) -> String {
-    let title = title.trim();
-    // 尝试去除 (N) 前缀
-    if let Some(rest) = title.strip_prefix('(') {
-        if let Some(idx) = rest.find(')') {
-            if rest[..idx].chars().all(|c| c.is_ascii_digit()) && idx > 0 {
-                return rest[idx + 1..].trim_start().to_string();
-            }
-        }
-    }
-    // 尝试去除 [N] 前缀
-    if let Some(rest) = title.strip_prefix('[') {
-        if let Some(idx) = rest.find(']') {
-            if rest[..idx].chars().all(|c| c.is_ascii_digit()) && idx > 0 {
-                return rest[idx + 1..].trim_start().to_string();
-            }
-        }
-    }
-    title.to_string()
+    result.or_else(|| extract_url_from_title(window_title))
 }
 
 /// 通过原生 UI Automation COM 接口获取浏览器地址栏 URL
 /// 使用 HWND 精准定位浏览器窗口，查找 Edit 控件并读取 ValuePattern
 #[cfg(target_os = "windows")]
 fn get_url_via_uiautomation(hwnd: isize) -> Option<String> {
-    use uiautomation::types::ControlType;
-    use uiautomation::types::Handle;
-    use uiautomation::patterns::UIValuePattern;
+    use uiautomation::patterns::{UILegacyIAccessiblePattern, UIValuePattern};
+    use uiautomation::types::{ControlType, Handle};
     use uiautomation::UIAutomation;
 
     let automation = UIAutomation::new().ok()?;
     // Handle 内部字段在 0.24.4 变为私有，改用 From trait 构造
     let window_element = automation.element_from_handle(Handle::from(hwnd)).ok()?;
 
-    // 搜寻 ControlType::Edit 和 ControlType::Document
-    // 使用 find_first 替代 find_all：大幅度提升性能！find_all 会遍历数万个网页元素的完整 DOM 树导致必然超时，
-    // 而地址栏通常是处于极浅层级的第一个 Edit 或 Document。
-    let mut targets = Vec::new();
-    
-    if let Ok(edit) = automation.create_matcher().from(window_element.clone()).control_type(ControlType::Edit).timeout(1000).find_first() {
-        targets.push(edit);
-    }
-    if let Ok(doc) = automation.create_matcher().from(window_element.clone()).control_type(ControlType::Document).timeout(1000).find_first() {
-        targets.push(doc);
-    }
+    let mut best_match: Option<(i32, String)> = None;
 
-    for edit in targets {
-        let mut extracted_value = None;
-        
-        // 1. 优先尝试 UIValuePattern
-        if let Ok(pattern) = edit.get_pattern::<UIValuePattern>() {
-            if let Ok(v) = pattern.get_value() {
-                extracted_value = Some(v.trim().to_string());
-            }
-        }
-        
-        // 2. 如果没有或者为空，尝试 UILegacyIAccessiblePattern
-        if extracted_value.as_ref().map(|s| s.is_empty()).unwrap_or(true) {
-            use uiautomation::patterns::UILegacyIAccessiblePattern;
-            if let Ok(pattern) = edit.get_pattern::<UILegacyIAccessiblePattern>() {
-                if let Ok(v) = pattern.get_value() {
-                    extracted_value = Some(v.trim().to_string());
-                }
-            }
-        }
-        
-        // 3. 作为最后手段，检查控件自身的 Name（有时地址就是 Name）
-        if extracted_value.as_ref().map(|s| s.is_empty()).unwrap_or(true) {
-            if let Ok(name) = edit.get_name() {
-                let name = name.trim();
-                // 只有明显是 URL 的才取用
-                if name.starts_with("http://") || name.starts_with("https://") {
-                    extracted_value = Some(name.to_string());
-                }
-            }
+    let mut inspect_control = |control: uiautomation::UIElement| {
+        let control_type = match control.get_control_type() {
+            Ok(t) => t,
+            Err(_) => return,
+        };
+
+        if control_type != ControlType::Edit && control_type != ControlType::Document {
+            return;
         }
 
-        if let Some(value) = extracted_value {
-            if value.is_empty() {
+        let name = control.get_name().unwrap_or_default();
+        let class_name = control.get_classname().unwrap_or_default();
+        let name_lower = name.to_lowercase();
+        let class_lower = class_name.to_lowercase();
+        let address_like = name_lower.contains("address")
+            || name_lower.contains("地址")
+            || name_lower.contains("location")
+            || name_lower.contains("omnibox")
+            || class_lower.contains("omnibox")
+            || class_lower.contains("address");
+
+        let mut candidates = Vec::new();
+        if let Ok(pattern) = control.get_pattern::<UIValuePattern>() {
+            if let Ok(value) = pattern.get_value() {
+                candidates.push(value);
+            }
+        }
+        if let Ok(pattern) = control.get_pattern::<UILegacyIAccessiblePattern>() {
+            if let Ok(value) = pattern.get_value() {
+                candidates.push(value);
+            }
+        }
+        candidates.push(name);
+
+        for raw in candidates {
+            let Some(url) = normalize_possible_url(&raw) else {
                 continue;
+            };
+
+            let mut score = match control_type {
+                ControlType::Edit => 35,
+                ControlType::Document => 15,
+                _ => 0,
+            };
+
+            if address_like {
+                score += 50;
             }
-            // 完整 URL
-            if value.starts_with("http://") || value.starts_with("https://") {
-                return Some(value);
+            if raw.starts_with("http://") || raw.starts_with("https://") {
+                score += 30;
+            } else if raw == class_name || raw == name {
+                score += 5;
             }
-            // Chromium 系浏览器地址栏常省略协议前缀
-            if value.contains('.')
-                && !value.contains(' ')
-                && value.len() > 3
-                && !value.starts_with('.')
+
+            if score >= 60
+                && best_match
+                    .as_ref()
+                    .map(|(best_score, _)| score > *best_score)
+                    .unwrap_or(true)
             {
-                return Some(format!("https://{}", value));
+                best_match = Some((score, url));
             }
         }
+    };
+
+    // 快速路径：只查首个 Edit / Document，命中高置信地址栏则立即返回
+    if let Ok(edit) = automation
+        .create_matcher()
+        .from(window_element.clone())
+        .control_type(ControlType::Edit)
+        .timeout(800)
+        .find_first()
+    {
+        inspect_control(edit);
+    }
+    if let Some((score, url)) = &best_match {
+        if *score >= 85 {
+            return Some(url.clone());
+        }
+    }
+    if let Ok(doc) = automation
+        .create_matcher()
+        .from(window_element)
+        .control_type(ControlType::Document)
+        .timeout(800)
+        .find_first()
+    {
+        inspect_control(doc);
     }
 
-    None
+    best_match.map(|(_, url)| url)
 }
 
 /// 从窗口标题尝试提取 URL 或域名（UI Automation 失败时的兜底方案）
-#[cfg(target_os = "windows")]
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn extract_url_from_title(window_title: &str) -> Option<String> {
     let title = window_title.trim();
     if title.is_empty() {
@@ -369,26 +392,66 @@ fn extract_url_from_title(window_title: &str) -> Option<String> {
     }
 
     // 标题本身就是 URL
-    if title.starts_with("http://") || title.starts_with("https://") {
-        return Some(title.split_whitespace().next()?.to_string());
+    if let Some(url) = title
+        .split_whitespace()
+        .next()
+        .and_then(normalize_possible_url)
+    {
+        return Some(url);
     }
 
     // 尝试从 "Page Title - domain.com - Browser" 格式中提取域名
     for part in title.rsplit(" - ") {
-        let part = part.trim().to_lowercase();
-        if part.contains('.')
-            && !part.contains(' ')
-            && part.len() > 3
-            && part.len() < 100
-            && part
-                .chars()
-                .all(|c| c.is_alphanumeric() || c == '.' || c == '-' || c == '_')
-        {
-            return Some(format!("https://{}", part));
+        if let Some(url) = normalize_possible_url(part) {
+            return Some(url);
         }
     }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        extract_url_from_title, is_browser_app, is_probable_domain, normalize_possible_url,
+    };
+
+    #[test]
+    fn 识别浏览器进程名() {
+        assert!(is_browser_app("chrome.exe"));
+        assert!(is_browser_app("msedge.exe"));
+        assert!(is_browser_app("Safari"));
+        assert!(!is_browser_app("Code.exe"));
+    }
+
+    #[test]
+    fn 规范化地址栏候选值() {
+        assert_eq!(
+            normalize_possible_url("https://example.com/path"),
+            Some("https://example.com/path".to_string())
+        );
+        assert_eq!(
+            normalize_possible_url("example.com"),
+            Some("https://example.com".to_string())
+        );
+        assert_eq!(
+            normalize_possible_url("chrome://settings"),
+            Some("chrome://settings".to_string())
+        );
+        assert_eq!(normalize_possible_url("搜索内容"), None);
+        assert_eq!(normalize_possible_url("1.2.3"), None);
+    }
+
+    #[test]
+    fn 从标题提取域名时避免误判() {
+        assert_eq!(
+            extract_url_from_title("项目文档 - docs.example.com - Google Chrome"),
+            Some("https://docs.example.com".to_string())
+        );
+        assert_eq!(extract_url_from_title("版本 1.2.3 - Google Chrome"), None);
+        assert!(is_probable_domain("sub.example.com"));
+        assert!(!is_probable_domain("1.2.3"));
+    }
 }
 
 /// 获取当前活动窗口信息 (macOS)
@@ -859,14 +922,8 @@ pub fn get_overlay_windows(frontmost_app: &str) -> Vec<ActiveWindow> {
             }
 
             // 排除已知悬浮工具栏应用的浮动窗口
-            if TOOLBAR_APPS
-                .iter()
-                .any(|&app| owner_name.contains(app))
-            {
-                log::debug!(
-                    "🪟 排除工具栏浮动窗口: {} (layer={})",
-                    owner_name, layer
-                );
+            if TOOLBAR_APPS.iter().any(|&app| owner_name.contains(app)) {
+                log::debug!("🪟 排除工具栏浮动窗口: {} (layer={})", owner_name, layer);
                 continue;
             }
 
@@ -918,7 +975,11 @@ pub fn get_overlay_windows(frontmost_app: &str) -> Vec<ActiveWindow> {
 
             log::debug!(
                 "🪟 检测到浮动窗口: {} - {} (layer={}, {}x{})",
-                owner_name, window_title, layer, width as i32, height as i32
+                owner_name,
+                window_title,
+                layer,
+                width as i32,
+                height as i32
             );
 
             results.push(ActiveWindow {
@@ -939,7 +1000,10 @@ pub fn get_overlay_windows(frontmost_app: &str) -> Vec<ActiveWindow> {
 
 /// 从 CFDictionary 读取一个数值字段
 #[cfg(target_os = "macos")]
-unsafe fn get_cf_dict_number(dict: core_foundation::dictionary::CFDictionaryRef, key: &str) -> Option<f64> {
+unsafe fn get_cf_dict_number(
+    dict: core_foundation::dictionary::CFDictionaryRef,
+    key: &str,
+) -> Option<f64> {
     use core_foundation::base::{CFTypeRef, TCFType};
     use core_foundation::string::CFString;
 

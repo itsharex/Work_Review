@@ -2,9 +2,6 @@
   import { createEventDispatcher, onMount } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
   import { enable as enableAutostart, disable as disableAutostart, isEnabled as isAutostartEnabled } from '@tauri-apps/plugin-autostart';
-  import { check } from '@tauri-apps/plugin-updater';
-  import { ask, message as showMessage } from '@tauri-apps/plugin-dialog';
-  import { relaunch } from '@tauri-apps/plugin-process';
 
   export let config;
 

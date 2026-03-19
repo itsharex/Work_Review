@@ -1,4 +1,0 @@
-    Child 1: Pane (Name: '', Class: 'Intermediate D3D Window')
-    Child 1: Pane (Name: '快讯_融资_互联网_资本_科技_合并_最新快讯_36氪 - Google Chrome - momoi', Class: 'BrowserRootView')
-        Child 2: Pane (Name: '', Class: 'NonClientView')
-            Child 3: Pane (Name: '', Class: 'BrowserFrameViewWin')

@@ -72,6 +72,7 @@ impl IdleDetector {
     }
 
     /// 获取当前空闲秒数（供外部使用）
+    #[allow(dead_code)]
     pub fn get_idle_seconds(&self) -> u64 {
         get_idle_seconds()
     }
