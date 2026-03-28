@@ -6,6 +6,7 @@
   import { cache } from '../../lib/stores/cache.js';
   import { appIconStore, getIconCacheKey, preloadAppIcons } from '../../lib/stores/iconCache.js';
   import { resolveAppIconSrc } from '../../lib/utils/appVisuals.js';
+  import { formatBrowserUrlForDisplay } from '../../lib/utils/browserUrl.js';
 
   // 获取本地日期（避免 UTC 时区问题）
   function getLocalDateString() {
@@ -126,10 +127,10 @@
     // 无标题时，如果有 URL 显示域名
     if (browserUrl) {
       try {
-        const url = new URL(browserUrl);
+        const url = new URL(formatBrowserUrlForDisplay(browserUrl));
         return url.hostname;
       } catch {
-        return browserUrl.substring(0, 40);
+        return formatBrowserUrlForDisplay(browserUrl).substring(0, 40);
       }
     }
     
@@ -655,7 +656,7 @@
               on:click={() => openUrl(selectedActivity.browser_url)}
               class="text-primary-600 dark:text-primary-400 mt-1 text-sm hover:underline break-all block text-left cursor-pointer"
             >
-              {selectedActivity.browser_url}
+              {formatBrowserUrlForDisplay(selectedActivity.browser_url)}
             </button>
           </div>
         {/if}

@@ -7,6 +7,7 @@
   import { cache } from '../lib/stores/cache.js';
   import { appIconStore, getIconCacheKey, preloadAppIcons } from '../lib/stores/iconCache.js';
   import { resolveAppIconSrc } from '../lib/utils/appVisuals.js';
+  import { formatBrowserUrlForDisplay } from '../lib/utils/browserUrl.js';
 
   let stats = null;
   let loading = true;
@@ -338,8 +339,11 @@
             {#each (expandedDomains.has(domain.domain) ? domain.urls : domain.urls.slice(0, 10)) as url}
               <div class="flex items-center justify-between p-3 hover:bg-slate-50 dark:hover:bg-slate-800/30 transition-colors">
                 <div class="flex-1 min-w-0 mr-3">
-                  <p class="text-sm text-slate-600 dark:text-slate-300 truncate" title={url.url}>
-                    {url.url}
+                  <p
+                    class="text-sm text-slate-600 dark:text-slate-300 truncate"
+                    title={formatBrowserUrlForDisplay(url.url)}
+                  >
+                    {formatBrowserUrlForDisplay(url.url)}
                   </p>
                 </div>
                 <span class="text-xs text-slate-400 whitespace-nowrap">{formatDuration(url.duration)}</span>

@@ -3,10 +3,14 @@ use crate::error::AppError;
 use crate::error::Result;
 use once_cell::sync::Lazy;
 use regex::Regex;
+use serde_json::Value;
+use std::collections::HashMap;
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
+use std::path::{Path, PathBuf};
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 use std::process::{Command, Output, Stdio};
+use std::sync::Mutex;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 use std::thread;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -21,6 +25,31 @@ static URL_LIKE_RE: Lazy<Regex> = Lazy::new(|| {
     )
     .expect("URL regex should compile")
 });
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+static LAST_BROWSER_URL_LOGS: Lazy<Mutex<HashMap<String, String>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn remember_browser_url_log(cache: &mut HashMap<String, String>, key: &str, url: &str) -> bool {
+    match cache.get(key) {
+        Some(previous) if previous == url => false,
+        _ => {
+            cache.insert(key.to_string(), url.to_string());
+            true
+        }
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn log_browser_url_once(log_key: &str, message: &str, url: &str) {
+    let mut cache = LAST_BROWSER_URL_LOGS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if remember_browser_url_log(&mut cache, log_key, url) {
+        log::info!("{message}: {}", &url[..url.len().min(50)]);
+    }
+}
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 fn run_monitor_command_with_timeout(command: &mut Command, context: &str) -> Result<Output> {
@@ -340,6 +369,374 @@ pub fn browser_page_domain_label(page_hint: &str) -> String {
     }
 
     page_hint.trim().to_string()
+}
+
+fn firefox_family_profile_dir_from_ini(base_dir: &Path, ini_content: &str) -> Option<PathBuf> {
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum SectionKind {
+        Other,
+        Install,
+        Profile,
+    }
+
+    let mut section = SectionKind::Other;
+    let mut install_default_path: Option<String> = None;
+    let mut profile_path: Option<String> = None;
+    let mut profile_is_relative = true;
+    let mut profile_is_default = false;
+    let mut default_profile_path: Option<String> = None;
+    let mut first_profile_path: Option<String> = None;
+
+    let finalize_profile = |profile_path: &mut Option<String>,
+                            profile_is_relative: &mut bool,
+                            profile_is_default: &mut bool,
+                            default_profile_path: &mut Option<String>,
+                            first_profile_path: &mut Option<String>| {
+        let Some(path) = profile_path.take() else {
+            *profile_is_relative = true;
+            *profile_is_default = false;
+            return;
+        };
+
+        let resolved = if *profile_is_relative {
+            base_dir.join(&path)
+        } else {
+            PathBuf::from(&path)
+        };
+
+        if first_profile_path.is_none() {
+            *first_profile_path = Some(resolved.to_string_lossy().to_string());
+        }
+        if *profile_is_default {
+            *default_profile_path = Some(resolved.to_string_lossy().to_string());
+        }
+
+        *profile_is_relative = true;
+        *profile_is_default = false;
+    };
+
+    for raw_line in ini_content.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with(';') || line.starts_with('#') {
+            continue;
+        }
+
+        if line.starts_with('[') && line.ends_with(']') {
+            if section == SectionKind::Profile {
+                finalize_profile(
+                    &mut profile_path,
+                    &mut profile_is_relative,
+                    &mut profile_is_default,
+                    &mut default_profile_path,
+                    &mut first_profile_path,
+                );
+            }
+
+            let section_name = &line[1..line.len() - 1];
+            section = if section_name.starts_with("Install") {
+                SectionKind::Install
+            } else if section_name.starts_with("Profile") {
+                SectionKind::Profile
+            } else {
+                SectionKind::Other
+            };
+            continue;
+        }
+
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let key = key.trim();
+        let value = value.trim();
+
+        match section {
+            SectionKind::Install if key == "Default" => {
+                install_default_path = Some(base_dir.join(value).to_string_lossy().to_string());
+            }
+            SectionKind::Profile => match key {
+                "Path" => profile_path = Some(value.to_string()),
+                "IsRelative" => profile_is_relative = value != "0",
+                "Default" => profile_is_default = value == "1",
+                _ => {}
+            },
+            SectionKind::Other | SectionKind::Install => {}
+        }
+    }
+
+    if section == SectionKind::Profile {
+        finalize_profile(
+            &mut profile_path,
+            &mut profile_is_relative,
+            &mut profile_is_default,
+            &mut default_profile_path,
+            &mut first_profile_path,
+        );
+    }
+
+    install_default_path
+        .or(default_profile_path)
+        .or(first_profile_path)
+        .map(PathBuf::from)
+}
+
+fn decode_mozlz4_bytes(data: &[u8]) -> std::result::Result<Vec<u8>, String> {
+    const HEADER: &[u8; 8] = b"mozLz40\0";
+
+    if data.len() < 12 {
+        return Err("mozlz4 数据长度不足".to_string());
+    }
+    if &data[..8] != HEADER {
+        return Err("mozlz4 文件头不匹配".to_string());
+    }
+
+    let expected_len = u32::from_le_bytes([data[8], data[9], data[10], data[11]]) as usize;
+    let src = &data[12..];
+    let mut out = Vec::with_capacity(expected_len);
+    let mut index = 0usize;
+
+    while index < src.len() {
+        let token = src[index];
+        index += 1;
+
+        let mut literal_len = (token >> 4) as usize;
+        if literal_len == 15 {
+            loop {
+                let extra = *src
+                    .get(index)
+                    .ok_or_else(|| "mozlz4 字面量长度越界".to_string())?;
+                index += 1;
+                literal_len += extra as usize;
+                if extra != 255 {
+                    break;
+                }
+            }
+        }
+
+        let literal_end = index + literal_len;
+        if literal_end > src.len() {
+            return Err("mozlz4 字面量块越界".to_string());
+        }
+        out.extend_from_slice(&src[index..literal_end]);
+        index = literal_end;
+
+        if index >= src.len() {
+            break;
+        }
+
+        let offset = u16::from_le_bytes([
+            *src.get(index).ok_or_else(|| "mozlz4 offset 越界".to_string())?,
+            *src.get(index + 1)
+                .ok_or_else(|| "mozlz4 offset 越界".to_string())?,
+        ]) as usize;
+        index += 2;
+
+        if offset == 0 || offset > out.len() {
+            return Err("mozlz4 offset 非法".to_string());
+        }
+
+        let mut match_len = (token & 0x0F) as usize;
+        if match_len == 15 {
+            loop {
+                let extra = *src
+                    .get(index)
+                    .ok_or_else(|| "mozlz4 匹配长度越界".to_string())?;
+                index += 1;
+                match_len += extra as usize;
+                if extra != 255 {
+                    break;
+                }
+            }
+        }
+        match_len += 4;
+
+        let mut match_index = out.len() - offset;
+        for _ in 0..match_len {
+            let value = *out
+                .get(match_index)
+                .ok_or_else(|| "mozlz4 匹配引用越界".to_string())?;
+            out.push(value);
+            match_index += 1;
+        }
+    }
+
+    if out.len() != expected_len {
+        return Err(format!(
+            "mozlz4 解码长度不匹配: expected={}, actual={}",
+            expected_len,
+            out.len()
+        ));
+    }
+
+    Ok(out)
+}
+
+fn normalize_session_store_title(value: &str) -> String {
+    value.split(" - Mozilla Firefox")
+        .next()
+        .unwrap_or(value)
+        .split(" - Firefox")
+        .next()
+        .unwrap_or(value)
+        .split(" - Zen Browser")
+        .next()
+        .unwrap_or(value)
+        .split(" - Zen")
+        .next()
+        .unwrap_or(value)
+        .trim()
+        .to_string()
+}
+
+fn extract_active_tab_url_from_session_store_value(
+    value: &Value,
+    window_title: &str,
+) -> Option<String> {
+    let windows = value.get("windows")?.as_array()?;
+    if windows.is_empty() {
+        return None;
+    }
+
+    let selected_window_index = value
+        .get("selectedWindow")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(1)
+        .saturating_sub(1) as usize;
+    let normalized_window_title = normalize_session_store_title(window_title);
+    let mut best_match: Option<(i32, u64, String)> = None;
+
+    for (window_index, window) in windows.iter().enumerate() {
+        let Some(tabs) = window.get("tabs").and_then(|v| v.as_array()) else {
+            continue;
+        };
+
+        let selected_tab_index = window
+            .get("selected")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(1)
+            .saturating_sub(1) as usize;
+
+        for (tab_index, tab) in tabs.iter().enumerate() {
+            let Some(entries) = tab.get("entries").and_then(|v| v.as_array()) else {
+                continue;
+            };
+            if entries.is_empty() {
+                continue;
+            }
+
+            let selected_entry_index = tab
+                .get("index")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(1)
+                .saturating_sub(1) as usize;
+            let entry = entries
+                .get(selected_entry_index)
+                .or_else(|| entries.last())
+                .unwrap_or(&entries[0]);
+
+            let Some(raw_url) = entry.get("url").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let Some(url) = normalize_possible_url(raw_url) else {
+                continue;
+            };
+
+            let entry_title = entry
+                .get("title")
+                .and_then(|v| v.as_str())
+                .map(normalize_session_store_title)
+                .unwrap_or_default();
+            let last_accessed = tab
+                .get("lastAccessed")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+
+            let mut score = 0i32;
+            if !normalized_window_title.is_empty() && !entry_title.is_empty() {
+                if entry_title == normalized_window_title {
+                    score += 1_000;
+                } else if entry_title.contains(&normalized_window_title)
+                    || normalized_window_title.contains(&entry_title)
+                {
+                    score += 600;
+                }
+            }
+            if window_index == selected_window_index {
+                score += 120;
+            }
+            if tab_index == selected_tab_index {
+                score += 80;
+            }
+            if !tab.get("hidden").and_then(|v| v.as_bool()).unwrap_or(false) {
+                score += 20;
+            }
+            if raw_url.starts_with("http://") || raw_url.starts_with("https://") {
+                score += 20;
+            }
+
+            let replace = best_match
+                .as_ref()
+                .map(|(best_score, best_last_accessed, _)| {
+                    score > *best_score
+                        || (score == *best_score && last_accessed > *best_last_accessed)
+                })
+                .unwrap_or(true);
+
+            if replace {
+                best_match = Some((score, last_accessed, url));
+            }
+        }
+    }
+
+    best_match.map(|(_, _, url)| url)
+}
+
+#[cfg(target_os = "macos")]
+fn firefox_family_session_store_base_dir_macos(app_lower: &str) -> Option<PathBuf> {
+    let app_support_dir = dirs::data_dir()?;
+
+    if app_lower.contains("firefox") {
+        Some(app_support_dir.join("Firefox"))
+    } else if app_lower.contains("zen") {
+        Some(app_support_dir.join("Zen"))
+    } else {
+        None
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn firefox_family_session_store_url_macos(app_name: &str, window_title: &str) -> Option<String> {
+    let app_lower = app_name.to_lowercase();
+    let base_dir = firefox_family_session_store_base_dir_macos(&app_lower)?;
+    let ini_path = base_dir.join("profiles.ini");
+    let ini_content = std::fs::read_to_string(&ini_path).ok()?;
+    let profile_dir = firefox_family_profile_dir_from_ini(&base_dir, &ini_content)?;
+
+    let session_paths = [
+        profile_dir.join("sessionstore-backups/recovery.jsonlz4"),
+        profile_dir.join("sessionstore.jsonlz4"),
+    ];
+
+    for session_path in session_paths {
+        let Ok(raw) = std::fs::read(&session_path) else {
+            continue;
+        };
+        let Ok(decoded) = decode_mozlz4_bytes(&raw) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_slice::<Value>(&decoded) else {
+            continue;
+        };
+        if let Some(url) = extract_active_tab_url_from_session_store_value(&value, window_title) {
+            log_browser_url_once(
+                &format!("sessionstore:{app_name}"),
+                &format!("从 sessionstore 获取到 {app_name} URL"),
+                &url,
+            );
+            return Some(url);
+        }
+    }
+
+    None
 }
 
 /// 获取当前活动窗口信息
@@ -815,9 +1212,17 @@ fn extract_url_from_title(window_title: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
+        best_browser_url_candidate_from_output, browser_url_system_events_process_name_macos,
+        browser_url_ui_script_macos, decode_mozlz4_bytes,
+        extract_active_tab_url_from_session_store_value, remember_browser_url_log,
+        firefox_family_profile_dir_from_ini,
         categorize_app, extract_url_from_title, is_browser_app, is_probable_domain,
         normalize_possible_url,
     };
+    #[cfg(target_os = "macos")]
+    use std::{env, fs, process::Command, time::{SystemTime, UNIX_EPOCH}};
+    use std::collections::HashMap;
+    use std::path::Path;
 
     #[test]
     fn 识别浏览器进程名() {
@@ -879,6 +1284,202 @@ mod tests {
         assert!(is_probable_domain("sub.example.com"));
         assert!(!is_probable_domain("1.2.3"));
     }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn zen_浏览器应走_system_events_兜底() {
+        assert_eq!(
+            browser_url_system_events_process_name_macos("zen browser"),
+            Some("Zen")
+        );
+        let script = browser_url_ui_script_macos("Zen");
+        assert!(script.contains(r#"tell process "Zen""#));
+        assert!(script.contains("AXTextField"));
+        assert!(script.contains("toolbar 1 of frontWin"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn zen_ui_采集脚本应能通过编译() {
+        let script = browser_url_ui_script_macos("Zen");
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("系统时间应晚于 UNIX_EPOCH")
+            .as_nanos();
+        let compiled_path = env::temp_dir().join(format!("zen-url-ui-{unique}.scpt"));
+
+        let output = Command::new("osacompile")
+            .arg("-e")
+            .arg(&script)
+            .arg("-o")
+            .arg(&compiled_path)
+            .output()
+            .expect("应能调用 osacompile");
+
+        if compiled_path.exists() {
+            let _ = fs::remove_file(&compiled_path);
+        }
+
+        assert!(
+            output.status.success(),
+            "脚本编译失败: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn 浏览器_url候选应优先完整路径() {
+        let output = r#"
+https://www.google.com.hk
+www.google.com.hk
+https://www.google.com.hk/search?q=张凌赫
+"#;
+
+        assert_eq!(
+            best_browser_url_candidate_from_output(output),
+            Some("https://www.google.com.hk/search?q=张凌赫".to_string())
+        );
+    }
+
+    #[test]
+    fn 应从_profiles_ini_解析默认_profile目录() {
+        let ini = r#"
+[Install6ED35B3CA1B5D3AF]
+Default=Profiles/wkm9x2lf.Default (release)
+Locked=1
+
+[Profile1]
+Name=Default Profile
+IsRelative=1
+Path=Profiles/rb6yc5s2.Default Profile
+Default=1
+
+[Profile0]
+Name=Default (release)
+IsRelative=1
+Path=Profiles/wkm9x2lf.Default (release)
+"#;
+
+        let profile_dir =
+            firefox_family_profile_dir_from_ini(Path::new("/tmp/Zen"), ini).expect("应解析出默认 profile");
+
+        assert_eq!(
+            profile_dir,
+            Path::new("/tmp/Zen/Profiles/wkm9x2lf.Default (release)")
+        );
+    }
+
+    #[test]
+    fn mozlz4_字面量块应能解码() {
+        let data = [
+            b'm', b'o', b'z', b'L', b'z', b'4', b'0', 0, 5, 0, 0, 0, 0x50, b'h', b'e', b'l',
+            b'l', b'o',
+        ];
+
+        let decoded = decode_mozlz4_bytes(&data).expect("应成功解码");
+        assert_eq!(decoded, b"hello");
+    }
+
+    #[test]
+    fn mozlz4_匹配块应能解码() {
+        let data = [
+            b'm', b'o', b'z', b'L', b'z', b'4', b'0', 0, 9, 0, 0, 0, 0x32, b'a', b'b', b'c',
+            0x03, 0x00,
+        ];
+
+        let decoded = decode_mozlz4_bytes(&data).expect("应成功解码");
+        assert_eq!(decoded, b"abcabcabc");
+    }
+
+    #[test]
+    fn 应从_sessionstore_提取当前激活标签页_url() {
+        let value = serde_json::json!({
+            "selectedWindow": 1,
+            "windows": [
+                {
+                    "selected": 2,
+                    "tabs": [
+                        {
+                            "index": 1,
+                            "entries": [
+                                {"url": "https://example.com/older", "title": "旧页面"}
+                            ]
+                        },
+                        {
+                            "index": 2,
+                            "entries": [
+                                {"url": "https://example.com/step-1", "title": "步骤 1"},
+                                {"url": "https://example.com/final?q=1", "title": "最终页面"}
+                            ]
+                        }
+                    ]
+                }
+            ]
+        });
+
+        assert_eq!(
+            extract_active_tab_url_from_session_store_value(&value, ""),
+            Some("https://example.com/final?q=1".to_string())
+        );
+    }
+
+    #[test]
+    fn sessionstore_selected滞后时应优先窗口标题匹配的标签页() {
+        let value = serde_json::json!({
+            "selectedWindow": 1,
+            "windows": [
+                {
+                    "selected": 1,
+                    "tabs": [
+                        {
+                            "index": 1,
+                            "lastAccessed": 10,
+                            "entries": [
+                                {"url": "about:newtab", "title": "Mozilla Firefox"}
+                            ]
+                        },
+                        {
+                            "index": 1,
+                            "lastAccessed": 20,
+                            "entries": [
+                                {
+                                    "url": "https://www.google.com/search?q=test",
+                                    "title": "定的计划 - Google 搜索"
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        });
+
+        assert_eq!(
+            extract_active_tab_url_from_session_store_value(&value, "定的计划 - Google 搜索"),
+            Some("https://www.google.com/search?q=test".to_string())
+        );
+    }
+
+    #[test]
+    fn 相同浏览器_url日志应去重() {
+        let mut cache = HashMap::new();
+
+        assert!(remember_browser_url_log(
+            &mut cache,
+            "sessionstore:firefox",
+            "https://example.com/a"
+        ));
+        assert!(!remember_browser_url_log(
+            &mut cache,
+            "sessionstore:firefox",
+            "https://example.com/a"
+        ));
+        assert!(remember_browser_url_log(
+            &mut cache,
+            "sessionstore:firefox",
+            "https://example.com/b"
+        ));
+    }
 }
 
 /// 获取当前活动窗口信息 (macOS)
@@ -925,7 +1526,7 @@ fn get_active_window_with_options(include_browser_url: bool) -> Result<ActiveWin
 
         // 如果是浏览器，尝试获取 URL
         let browser_url = if include_browser_url {
-            get_browser_url(&app_name)
+            get_browser_url(&app_name, &window_title)
         } else {
             None
         };
@@ -1071,146 +1672,317 @@ fn normalize_electron_app_name(process_name: &str, window_title: &str) -> String
 /// 获取浏览器当前 URL (macOS)
 /// 使用 window 1 获取最前面窗口的活动标签页 URL
 #[cfg(target_os = "macos")]
-fn get_browser_url(app_name: &str) -> Option<String> {
-    let app_lower = app_name.to_lowercase();
-
-    // 根据不同浏览器使用不同的 AppleScript
-    // 使用 front window 获取最近激活的窗口的活动标签页 URL
-    let (script, browser_name) =
-        if app_lower.contains("chrome") || app_lower.contains("google chrome") {
-            // Chrome: 使用 front window 获取最近激活的窗口
-            (
-                r#"tell application "Google Chrome"
+fn browser_url_script_macos(app_lower: &str) -> Option<(&'static str, &'static str)> {
+    if app_lower.contains("chrome") || app_lower.contains("google chrome") {
+        // Chrome: 使用 front window 获取最近激活的窗口
+        Some((
+            r#"tell application "Google Chrome"
     if (count of windows) > 0 then
         return URL of active tab of front window
     else
         return ""
     end if
 end tell"#,
-                "Chrome",
-            )
-        } else if app_lower.contains("safari") {
-            (
-                r#"tell application "Safari"
+            "Chrome",
+        ))
+    } else if app_lower.contains("safari") {
+        Some((
+            r#"tell application "Safari"
     if (count of windows) > 0 then
         return URL of current tab of front window
     else
         return ""
     end if
 end tell"#,
-                "Safari",
-            )
-        } else if app_lower.contains("firefox") {
-            // Firefox 对 AppleScript 支持有限
-            (
-                r#"tell application "Firefox" to get URL of front document"#,
-                "Firefox",
-            )
-        } else if app_lower.contains("edge") {
-            (
-                r#"tell application "Microsoft Edge"
+            "Safari",
+        ))
+    } else if app_lower.contains("firefox") {
+        // Firefox 对 AppleScript 支持有限
+        Some((r#"tell application "Firefox" to get URL of front document"#, "Firefox"))
+    } else if app_lower.contains("edge") {
+        Some((
+            r#"tell application "Microsoft Edge"
     if (count of windows) > 0 then
         return URL of active tab of front window
     else
         return ""
     end if
 end tell"#,
-                "Edge",
-            )
-        } else if app_lower.contains("arc") {
-            (
-                r#"tell application "Arc"
+            "Edge",
+        ))
+    } else if app_lower.contains("arc") {
+        Some((
+            r#"tell application "Arc"
     if (count of windows) > 0 then
         return URL of active tab of front window
     else
         return ""
     end if
 end tell"#,
-                "Arc",
-            )
-        } else if app_lower.contains("brave") {
-            (
-                r#"tell application "Brave Browser"
+            "Arc",
+        ))
+    } else if app_lower.contains("brave") {
+        Some((
+            r#"tell application "Brave Browser"
     if (count of windows) > 0 then
         return URL of active tab of front window
     else
         return ""
     end if
 end tell"#,
-                "Brave",
-            )
-        } else if app_lower.contains("opera") {
-            (
-                r#"tell application "Opera"
+            "Brave",
+        ))
+    } else if app_lower.contains("opera") {
+        Some((
+            r#"tell application "Opera"
     if (count of windows) > 0 then
         return URL of active tab of front window
     else
         return ""
     end if
 end tell"#,
-                "Opera",
-            )
-        } else if app_lower.contains("vivaldi") {
-            (
-                r#"tell application "Vivaldi"
+            "Opera",
+        ))
+    } else if app_lower.contains("vivaldi") {
+        Some((
+            r#"tell application "Vivaldi"
     if (count of windows) > 0 then
         return URL of active tab of front window
     else
         return ""
     end if
 end tell"#,
-                "Vivaldi",
-            )
-        } else if app_lower.contains("chromium") {
-            (
-                r#"tell application "Chromium"
+            "Vivaldi",
+        ))
+    } else if app_lower.contains("chromium") {
+        Some((
+            r#"tell application "Chromium"
     if (count of windows) > 0 then
         return URL of active tab of front window
     else
         return ""
     end if
 end tell"#,
-                "Chromium",
-            )
-        } else if app_lower.contains("orion") {
-            (
-                r#"tell application "Orion"
+            "Chromium",
+        ))
+    } else if app_lower.contains("orion") {
+        Some((
+            r#"tell application "Orion"
     if (count of documents) > 0 then
         return URL of front document
     else
         return ""
     end if
 end tell"#,
-                "Orion",
-            )
-        } else if app_lower.contains("zen") {
-            // Zen 浏览器基于 Firefox
-            (
-                r#"tell application "Zen Browser"
+            "Orion",
+        ))
+    } else if app_lower.contains("sidekick") {
+        // Sidekick 基于 Chromium
+        Some((
+            r#"tell application "Sidekick"
     if (count of windows) > 0 then
         return URL of active tab of front window
     else
         return ""
     end if
 end tell"#,
-                "Zen",
-            )
-        } else if app_lower.contains("sidekick") {
-            // Sidekick 基于 Chromium
-            (
-                r#"tell application "Sidekick"
-    if (count of windows) > 0 then
-        return URL of active tab of front window
-    else
-        return ""
-    end if
-end tell"#,
-                "Sidekick",
-            )
-        } else {
-            log::debug!("未识别的浏览器: {app_name}");
-            return None;
+            "Sidekick",
+        ))
+    } else {
+        None
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn browser_url_system_events_process_name_macos(app_lower: &str) -> Option<&'static str> {
+    if app_lower.contains("firefox") {
+        Some("Firefox")
+    } else if app_lower.contains("zen") {
+        Some("Zen")
+    } else {
+        None
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn browser_url_ui_script_macos(process_name: &str) -> String {
+    format!(
+        r#"set output to ""
+tell application "System Events"
+    tell process "{process_name}"
+        if (count of windows) is 0 then return ""
+        set frontWin to front window
+        try
+            set output to my collect_url_candidates(toolbar 1 of frontWin)
+        end try
+        if output is not "" then return output
+        return my collect_url_candidates(frontWin)
+    end tell
+end tell
+
+on collect_url_candidates(rootElem)
+    using terms from application "System Events"
+        tell application "System Events"
+            set output to ""
+            set allElems to {{}}
+            try
+                set allElems to entire contents of rootElem
+            on error
+                return ""
+            end try
+
+            repeat with elem in allElems
+                try
+                    set roleName to (role of elem) as text
+                    if roleName is "AXTextField" or roleName is "AXTextArea" or roleName is "AXComboBox" then
+                        try
+                            set candidateValue to (value of elem) as text
+                            if candidateValue is not "" then set output to output & candidateValue & linefeed
+                        end try
+                        try
+                            set candidateValue to (description of elem) as text
+                            if candidateValue is not "" then set output to output & candidateValue & linefeed
+                        end try
+                        try
+                            set candidateValue to (title of elem) as text
+                            if candidateValue is not "" then set output to output & candidateValue & linefeed
+                        end try
+                        try
+                            set candidateValue to (name of elem) as text
+                            if candidateValue is not "" then set output to output & candidateValue & linefeed
+                        end try
+                    end if
+                end try
+            end repeat
+
+            return output
+        end tell
+    end using terms from
+end collect_url_candidates"#,
+        process_name = process_name
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn best_browser_url_candidate_from_output(output: &str) -> Option<String> {
+    let mut best_match: Option<(i32, String)> = None;
+
+    for raw_line in output.lines() {
+        let raw = raw_line.trim();
+        if raw.is_empty() {
+            continue;
+        }
+
+        let Some(url) = normalize_possible_url(raw) else {
+            continue;
         };
+
+        let mut score = 40;
+        if raw.starts_with("http://") || raw.starts_with("https://") || raw.starts_with("file://") {
+            score += 40;
+        }
+        if raw.contains("://") {
+            score += 20;
+        }
+        if raw.contains('/') || raw.contains('?') || raw.contains('#') {
+            score += 10;
+        }
+        if raw.len() > 24 {
+            score += 5;
+        }
+
+        let replace = best_match
+            .as_ref()
+            .map(|(best_score, best_url)| score > *best_score || (score == *best_score && url.len() > best_url.len()))
+            .unwrap_or(true);
+
+        if replace {
+            best_match = Some((score, url));
+        }
+    }
+
+    best_match.map(|(_, url)| url)
+}
+
+#[cfg(target_os = "macos")]
+fn browser_url_candidates_preview_from_output(output: &str, max_items: usize) -> Vec<String> {
+    let mut items = Vec::new();
+
+    for raw_line in output.lines() {
+        let raw = raw_line.trim();
+        if raw.is_empty() {
+            continue;
+        }
+
+        let value = normalize_possible_url(raw).unwrap_or_else(|| raw.to_string());
+        if items.iter().any(|existing| existing == &value) {
+            continue;
+        }
+
+        items.push(value);
+        if items.len() >= max_items {
+            break;
+        }
+    }
+
+    items
+}
+
+#[cfg(target_os = "macos")]
+fn get_browser_url_via_system_events(process_name: &str) -> Option<String> {
+    let script = browser_url_ui_script_macos(process_name);
+    let output = run_monitor_command_with_timeout(
+        Command::new("osascript").arg("-e").arg(script),
+        &format!("{process_name} URL UI 采集"),
+    )
+    .ok()?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        log::warn!("获取 {process_name} UI URL 失败: {}", stderr.trim());
+        return None;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if process_name == "Zen" {
+        let preview = browser_url_candidates_preview_from_output(&stdout, 8);
+        if !preview.is_empty() {
+            log::info!("Zen UI URL 候选: {}", preview.join(" | "));
+        }
+    }
+    let url = best_browser_url_candidate_from_output(&stdout);
+    if let Some(ref url) = url {
+        log_browser_url_once(
+            &format!("ui:{process_name}"),
+            &format!("获取到 {process_name} UI URL"),
+            url,
+        );
+    }
+    url
+}
+
+#[cfg(target_os = "macos")]
+fn get_browser_url(app_name: &str, window_title: &str) -> Option<String> {
+    let app_lower = app_name.to_lowercase();
+
+    if app_lower.contains("firefox") || app_lower.contains("zen") {
+        if let Some(url) = firefox_family_session_store_url_macos(app_name, window_title) {
+            return Some(url);
+        }
+    }
+
+    if let Some(process_name) = browser_url_system_events_process_name_macos(&app_lower) {
+        if let Some(url) = get_browser_url_via_system_events(process_name) {
+            return Some(url);
+        }
+        log::debug!("{process_name} 未从辅助功能树中提取到 URL");
+        return None;
+    }
+
+    let Some((script, browser_name)) = browser_url_script_macos(&app_lower) else {
+        log::debug!("未识别的浏览器: {app_name}");
+        return None;
+    };
 
     log::debug!("尝试获取 {browser_name} URL: {app_name}");
 
@@ -1223,7 +1995,11 @@ end tell"#,
     if output.status.success() {
         let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
         if !url.is_empty() && (url.starts_with("http") || url.starts_with("file")) {
-            log::info!("获取到 {} URL: {}", browser_name, &url[..url.len().min(50)]);
+            log_browser_url_once(
+                &format!("script:{browser_name}"),
+                &format!("获取到 {browser_name} URL"),
+                &url,
+            );
             Some(url)
         } else {
             log::debug!("{browser_name} 返回空 URL");
@@ -1536,7 +2312,7 @@ pub fn get_visible_windows() -> Result<Vec<ActiveWindow>> {
                 let parts: Vec<&str> = line.splitn(2, '|').collect();
                 let app_name = parts.first().unwrap_or(&"Unknown").to_string();
                 let window_title = parts.get(1).unwrap_or(&"").to_string();
-                let browser_url = get_browser_url(&app_name);
+                let browser_url = get_browser_url(&app_name, &window_title);
                 ActiveWindow {
                     app_name,
                     window_title,

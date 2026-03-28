@@ -362,7 +362,7 @@ fn format_memory_references(references: &[MemorySearchItem]) -> String {
 
             if let Some(browser_url) = &item.browser_url {
                 if !browser_url.is_empty() {
-                    parts.push(format!("URL: {browser_url}"));
+                    parts.push(format!("URL: {}", format_browser_url_for_display(browser_url)));
                 }
             }
 
@@ -380,6 +380,51 @@ fn format_memory_references(references: &[MemorySearchItem]) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n\n")
+}
+
+fn format_browser_url_for_display(raw_url: &str) -> String {
+    let mut output = String::with_capacity(raw_url.len());
+    let bytes = raw_url.as_bytes();
+    let mut index = 0usize;
+
+    while index < bytes.len() {
+        if bytes[index] != b'%' {
+            output.push(bytes[index] as char);
+            index += 1;
+            continue;
+        }
+
+        let start = index;
+        let mut decoded_bytes = Vec::new();
+
+        while index + 2 < bytes.len() && bytes[index] == b'%' {
+            let hex = &raw_url[index + 1..index + 3];
+            let Ok(value) = u8::from_str_radix(hex, 16) else {
+                break;
+            };
+            decoded_bytes.push(value);
+            index += 3;
+        }
+
+        if decoded_bytes.is_empty() {
+            output.push('%');
+            index = start + 1;
+            continue;
+        }
+
+        let raw_segment = &raw_url[start..index];
+        if !decoded_bytes.iter().any(|byte| *byte >= 0x80) {
+            output.push_str(raw_segment);
+            continue;
+        }
+
+        match String::from_utf8(decoded_bytes) {
+            Ok(decoded) => output.push_str(&decoded),
+            Err(_) => output.push_str(raw_segment),
+        }
+    }
+
+    output
 }
 
 fn is_low_signal_reference(item: &MemorySearchItem) -> bool {
@@ -463,7 +508,10 @@ fn build_fallback_memory_answer(question: &str, references: &[MemorySearchItem])
         }
         if let Some(browser_url) = &item.browser_url {
             if !browser_url.is_empty() {
-                answer.push_str(&format!("，URL：{browser_url}"));
+                answer.push_str(&format!(
+                    "，URL：{}",
+                    format_browser_url_for_display(browser_url)
+                ));
             }
         }
         if let Some(duration) = item.duration {
@@ -3986,11 +4034,174 @@ pub async fn get_app_icon(
     get_app_icon_impl(&app_name, executable_path.as_deref()).await
 }
 
+#[cfg(any(target_os = "macos", test))]
+fn normalize_macos_app_lookup_name(value: &str) -> String {
+    let trimmed = value.trim().trim_end_matches(".app");
+    let mut normalized = String::new();
+    let mut last_was_space = false;
+
+    for ch in trimmed.chars().flat_map(|c| c.to_lowercase()) {
+        if ch.is_alphanumeric() {
+            normalized.push(ch);
+            last_was_space = false;
+        } else if !last_was_space {
+            normalized.push(' ');
+            last_was_space = true;
+        }
+    }
+
+    normalized.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn macos_significant_name_tokens(value: &str) -> Vec<String> {
+    const STOPWORDS: &[&str] = &["app", "browser", "desktop", "helper", "tools"];
+
+    let mut tokens = Vec::new();
+    for token in normalize_macos_app_lookup_name(value).split_whitespace() {
+        if token.len() < 2 || STOPWORDS.contains(&token) {
+            continue;
+        }
+        if !tokens.iter().any(|existing| existing == token) {
+            tokens.push(token.to_string());
+        }
+    }
+    tokens
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn macos_bundle_path_from_executable(executable_path: &str) -> Option<PathBuf> {
+    let path = Path::new(executable_path);
+    for ancestor in path.ancestors() {
+        let is_app_bundle = ancestor
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| ext.eq_ignore_ascii_case("app"))
+            .unwrap_or(false);
+        if is_app_bundle {
+            return Some(ancestor.to_path_buf());
+        }
+    }
+    None
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn macos_score_app_bundle_name(app_name: &str, bundle_name: &str) -> i32 {
+    let normalized_app = normalize_macos_app_lookup_name(app_name);
+    let normalized_bundle = normalize_macos_app_lookup_name(bundle_name);
+    if normalized_app.is_empty() || normalized_bundle.is_empty() {
+        return 0;
+    }
+
+    let mut score = 0;
+    if normalized_app == normalized_bundle {
+        score += 1000;
+    } else if normalized_app.contains(&normalized_bundle) || normalized_bundle.contains(&normalized_app) {
+        score += 500;
+    }
+
+    let app_tokens = macos_significant_name_tokens(&normalized_app);
+    let bundle_tokens = macos_significant_name_tokens(&normalized_bundle);
+    let overlap_count = bundle_tokens
+        .iter()
+        .filter(|token| app_tokens.iter().any(|candidate| candidate == *token))
+        .count() as i32;
+    score += overlap_count * 160;
+
+    if let Some(first_token) = app_tokens.first() {
+        if normalized_bundle.starts_with(first_token) {
+            score += 80;
+        }
+    }
+
+    score
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn collect_macos_app_bundles(root: &Path, depth: usize, bundles: &mut Vec<PathBuf>) {
+    if depth == 0 || !root.exists() {
+        return;
+    }
+
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+
+        let is_app_bundle = path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| ext.eq_ignore_ascii_case("app"))
+            .unwrap_or(false);
+        if is_app_bundle {
+            bundles.push(path);
+            continue;
+        }
+
+        collect_macos_app_bundles(&path, depth.saturating_sub(1), bundles);
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn macos_icon_app_path_candidates(app_name: &str, executable_path: Option<&str>) -> Vec<String> {
+    let mut candidates: Vec<(i32, String)> = Vec::new();
+
+    if let Some(path) = executable_path.and_then(macos_bundle_path_from_executable) {
+        candidates.push((i32::MAX, path.to_string_lossy().to_string()));
+    }
+
+    let mut search_roots = vec![
+        PathBuf::from("/Applications"),
+        PathBuf::from("/System/Applications"),
+        PathBuf::from("/System/Applications/Utilities"),
+    ];
+    if let Some(home_dir) = dirs::home_dir() {
+        search_roots.push(home_dir.join("Applications"));
+    }
+
+    let mut bundles = Vec::new();
+    for root in search_roots {
+        collect_macos_app_bundles(&root, 3, &mut bundles);
+    }
+
+    for bundle in bundles {
+        let Some(bundle_name) = bundle.file_stem().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let score = macos_score_app_bundle_name(app_name, bundle_name);
+        if score <= 0 {
+            continue;
+        }
+        candidates.push((score, bundle.to_string_lossy().to_string()));
+    }
+
+    candidates.sort_by(|(score_a, path_a), (score_b, path_b)| {
+        score_b
+            .cmp(score_a)
+            .then_with(|| path_a.len().cmp(&path_b.len()))
+            .then_with(|| path_a.cmp(path_b))
+    });
+
+    let mut deduped = Vec::new();
+    for (_, path) in candidates {
+        if deduped.iter().any(|existing| existing == &path) {
+            continue;
+        }
+        deduped.push(path);
+    }
+    deduped
+}
+
 /// macOS 实现：使用 mdfind 获取应用图标（带磁盘缓存）
 #[cfg(target_os = "macos")]
 async fn get_app_icon_impl(
     app_name: &str,
-    _executable_path: Option<&str>,
+    executable_path: Option<&str>,
 ) -> Result<String, AppError> {
     use std::path::Path;
     use std::process::Command;
@@ -4018,71 +4229,10 @@ async fn get_app_icon_impl(
         }
     }
 
-    // 常见系统应用的硬编码路径（这些应用不在 /Applications 目录下）
-    let system_apps: std::collections::HashMap<&str, &str> = [
-        ("Finder", "/System/Library/CoreServices/Finder.app"),
-        (
-            "System Settings",
-            "/System/Applications/System Settings.app",
-        ),
-        (
-            "System Preferences",
-            "/System/Applications/System Preferences.app",
-        ),
-        ("Terminal", "/System/Applications/Utilities/Terminal.app"),
-        (
-            "Activity Monitor",
-            "/System/Applications/Utilities/Activity Monitor.app",
-        ),
-        ("Console", "/System/Applications/Utilities/Console.app"),
-        (
-            "Disk Utility",
-            "/System/Applications/Utilities/Disk Utility.app",
-        ),
-        (
-            "Keychain Access",
-            "/System/Applications/Utilities/Keychain Access.app",
-        ),
-        (
-            "Screenshot",
-            "/System/Applications/Utilities/Screenshot.app",
-        ),
-        ("Preview", "/System/Applications/Preview.app"),
-        ("TextEdit", "/System/Applications/TextEdit.app"),
-        ("Notes", "/System/Applications/Notes.app"),
-        ("Safari", "/Applications/Safari.app"),
-    ]
-    .into_iter()
-    .collect();
-
-    // 1. 首先检查硬编码的系统应用路径
-    let app_path = if let Some(&sys_path) = system_apps.get(app_name) {
-        if Path::new(sys_path).exists() {
-            sys_path.to_string()
-        } else {
-            String::new()
-        }
-    } else {
-        // 2. 尝试 /Applications/{app_name}.app
-        let apps_path = format!("/Applications/{app_name}.app");
-        if Path::new(&apps_path).exists() {
-            apps_path
-        } else {
-            // 3. 使用 mdfind 在 Spotlight 索引中查找
-            let mdfind_output = Command::new("mdfind")
-                .args([&format!(
-                    "kMDItemKind == 'Application' && kMDItemDisplayName == '{app_name}'"
-                )])
-                .output();
-
-            if let Ok(output) = mdfind_output {
-                let paths = String::from_utf8_lossy(&output.stdout);
-                paths.lines().next().unwrap_or("").to_string()
-            } else {
-                String::new()
-            }
-        }
-    };
+    let app_path = macos_icon_app_path_candidates(app_name, executable_path)
+        .into_iter()
+        .find(|candidate| Path::new(candidate).exists())
+        .unwrap_or_default();
 
     if app_path.is_empty() {
         log::debug!("未找到应用路径: {app_name}");
@@ -4794,7 +4944,9 @@ mod tests {
     use super::{
         build_fallback_assistant_answer, build_updater_manifest_candidates,
         build_windows_icon_cache_key, detect_assistant_question_kind,
-        detect_assistant_question_kind_with_mode, merge_windows_icon_lookup_candidates,
+        detect_assistant_question_kind_with_mode, format_browser_url_for_display,
+        macos_score_app_bundle_name, normalize_macos_app_lookup_name,
+        merge_windows_icon_lookup_candidates,
         AssistantChatMessage, AssistantQuestionKind, AssistantReasoningMode,
     };
     use crate::database::MemorySearchItem;
@@ -4872,6 +5024,22 @@ mod tests {
             duration: Some(3600),
             score: 120,
         }]
+    }
+
+    #[test]
+    fn 应将命令输出中的_url_格式化为可读文本() {
+        assert_eq!(
+            format_browser_url_for_display(
+                "https://www.google.com.hk/search?q=%E5%A4%A7%E6%B8%A1%E5%8F%A3&client=firefox-b-d"
+            ),
+            "https://www.google.com.hk/search?q=大渡口&client=firefox-b-d"
+        );
+        assert_eq!(
+            format_browser_url_for_display(
+                "https://example.com/search?q=a%26b&name=%E5%BC%A0%E4%B8%89"
+            ),
+            "https://example.com/search?q=a%26b&name=张三"
+        );
     }
 
     fn sample_noisy_references() -> Vec<MemorySearchItem> {
@@ -4961,6 +5129,35 @@ mod tests {
         assert_ne!(portable_key, installed_key);
         assert!(portable_key.starts_with("VS_Code_"));
         assert!(installed_key.starts_with("VS_Code_"));
+    }
+
+    #[test]
+    fn macos图标名称归一化应兼容分隔符与后缀() {
+        assert_eq!(normalize_macos_app_lookup_name("Zen Browser"), "zen browser");
+        assert_eq!(
+            normalize_macos_app_lookup_name("antigravity_tools.app"),
+            "antigravity tools"
+        );
+        assert_eq!(
+            normalize_macos_app_lookup_name("Antigravity-Tools"),
+            "antigravity tools"
+        );
+    }
+
+    #[test]
+    fn macos应用包名评分应兼容缩写与分隔符差异() {
+        assert!(
+            macos_score_app_bundle_name("Foo Browser", "Foo")
+                > macos_score_app_bundle_name("Foo Browser", "Bar")
+        );
+        assert!(
+            macos_score_app_bundle_name("antigravity_tools", "Antigravity")
+                > macos_score_app_bundle_name("antigravity_tools", "Calculator")
+        );
+        assert!(
+            macos_score_app_bundle_name("antigravity_tools", "Antigravity Tools")
+                >= macos_score_app_bundle_name("antigravity_tools", "Antigravity")
+        );
     }
 
     #[test]
