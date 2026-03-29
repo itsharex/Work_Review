@@ -9,6 +9,12 @@ use crate::error::Result;
 use async_trait::async_trait;
 use std::path::Path;
 
+#[derive(Debug, Clone)]
+pub struct GeneratedReport {
+    pub content: String,
+    pub used_ai: bool,
+}
+
 /// AI分析器 trait
 /// 使用 async_trait 宏使 trait 支持 dyn 兼容
 #[async_trait]
@@ -20,7 +26,26 @@ pub trait Analyzer: Send + Sync {
         stats: &DailyStats,
         activities: &[Activity],
         screenshots_dir: &Path,
-    ) -> Result<String>;
+    ) -> Result<GeneratedReport>;
+}
+
+pub fn normalize_custom_prompt(custom_prompt: &str) -> Option<String> {
+    let trimmed = custom_prompt.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+pub fn append_custom_prompt(base_prompt: String, custom_prompt: &str) -> String {
+    if let Some(custom_prompt) = normalize_custom_prompt(custom_prompt) {
+        format!(
+            "{base_prompt}\n\n## 额外要求\n以下是用户补充的日报偏好，请在不违背前述结构和约束的前提下尽量满足：\n{custom_prompt}"
+        )
+    } else {
+        base_prompt
+    }
 }
 
 /// 创建分析器
@@ -30,13 +55,22 @@ pub fn create_analyzer(
     endpoint: &str,
     model: &str,
     api_key: Option<&str>,
+    custom_prompt: &str,
 ) -> Box<dyn Analyzer + Send + Sync> {
     match mode {
-        AiMode::Local => Box::new(local::LocalAnalyzer::new(endpoint, model)),
+        AiMode::Local => Box::new(local::LocalAnalyzer::new(endpoint, model, custom_prompt)),
         AiMode::Summary => Box::new(summary::SummaryAnalyzer::new(
-            provider, endpoint, model, api_key,
+            provider,
+            endpoint,
+            model,
+            api_key,
+            custom_prompt,
         )),
-        AiMode::Cloud => Box::new(cloud::CloudAnalyzer::new(api_key.unwrap_or(""), model)),
+        AiMode::Cloud => Box::new(cloud::CloudAnalyzer::new(
+            api_key.unwrap_or(""),
+            model,
+            custom_prompt,
+        )),
     }
 }
 
@@ -91,4 +125,23 @@ pub fn generate_stats_summary(stats: &DailyStats) -> String {
     }
 
     summary
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{append_custom_prompt, normalize_custom_prompt};
+
+    #[test]
+    fn 空白附加提示词应被忽略() {
+        assert_eq!(normalize_custom_prompt("   "), None);
+    }
+
+    #[test]
+    fn 应将附加提示词追加到基础提示词末尾() {
+        let prompt = append_custom_prompt("基础提示".to_string(), "输出偏正式一些");
+
+        assert!(prompt.contains("基础提示"));
+        assert!(prompt.contains("额外要求"));
+        assert!(prompt.contains("输出偏正式一些"));
+    }
 }

@@ -52,12 +52,12 @@
   function addKeyword() {
     if (!newKeyword.trim()) return;
     // 避免重复添加
-    if (config.privacy.sensitive_keywords.includes(newKeyword.trim())) {
+    if (config.privacy.excluded_keywords.includes(newKeyword.trim())) {
       newKeyword = '';
       return;
     }
-    config.privacy.sensitive_keywords = [
-      ...config.privacy.sensitive_keywords,
+    config.privacy.excluded_keywords = [
+      ...config.privacy.excluded_keywords,
       newKeyword.trim()
     ];
     newKeyword = '';
@@ -66,9 +66,9 @@
   }
 
   function removeKeyword(index) {
-    const keywords = [...config.privacy.sensitive_keywords];
+    const keywords = [...config.privacy.excluded_keywords];
     keywords.splice(index, 1);
-    config.privacy.sensitive_keywords = keywords;
+    config.privacy.excluded_keywords = keywords;
     dispatch('change', config);
   }
 
@@ -282,7 +282,7 @@
         {/if}
 
         <div class="flex flex-wrap gap-1.5">
-          {#each config.privacy.sensitive_keywords as keyword, i}
+          {#each config.privacy.excluded_keywords as keyword, i}
             <div class="settings-chip-neutral group">
               <span>{keyword}</span>
               <button
@@ -293,7 +293,7 @@
               </button>
             </div>
           {/each}
-          {#if config.privacy.sensitive_keywords.length === 0}
+          {#if config.privacy.excluded_keywords.length === 0}
             <span class="settings-subtle">暂无敏感词</span>
           {/if}
         </div>

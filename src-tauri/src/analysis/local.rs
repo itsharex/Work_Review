@@ -1,4 +1,4 @@
-use crate::analysis::{format_duration, Analyzer};
+use crate::analysis::{append_custom_prompt, format_duration, Analyzer, GeneratedReport};
 use crate::database::{Activity, DailyStats};
 use crate::error::{AppError, Result};
 use async_trait::async_trait;
@@ -13,11 +13,12 @@ use std::time::Duration;
 pub struct LocalAnalyzer {
     host: String,
     model: String,
+    custom_prompt: String,
     client: Client,
 }
 
 impl LocalAnalyzer {
-    pub fn new(host: &str, model: &str) -> Self {
+    pub fn new(host: &str, model: &str, custom_prompt: &str) -> Self {
         // 创建带超时配置的 HTTP 客户端
         let client = Client::builder()
             .timeout(Duration::from_secs(120)) // Ollama 模型推理可能较慢，设置2分钟超时
@@ -28,6 +29,7 @@ impl LocalAnalyzer {
         Self {
             host: host.to_string(),
             model: model.to_string(),
+            custom_prompt: custom_prompt.to_string(),
             client,
         }
     }
@@ -69,7 +71,8 @@ impl LocalAnalyzer {
             .take(20)
             .collect();
 
-        let prompt = format!(
+        let prompt = append_custom_prompt(
+            format!(
             r#"你是一位风趣幽默的工作效率分析师。请根据以下打工人今日的工作数据，生成一份有温度的工作分析。
 
 ## 今日数据
@@ -105,6 +108,8 @@ impl LocalAnalyzer {
             } else {
                 keywords.join("、")
             }
+        ),
+            &self.custom_prompt,
         );
 
         // 调用 Ollama API
@@ -184,11 +189,12 @@ impl Analyzer for LocalAnalyzer {
         stats: &DailyStats,
         activities: &[Activity],
         _screenshots_dir: &Path,
-    ) -> Result<String> {
+    ) -> Result<GeneratedReport> {
         log::info!("生成本地日报（尝试调用 Ollama）");
 
         // 首先生成固定的统计部分
         let mut report = format!("# 工作日报 - {date}\n\n");
+        let mut used_ai = false;
 
         // 固定模板部分：数据统计
         report.push_str("## 一、今日概览\n\n");
@@ -244,6 +250,7 @@ impl Analyzer for LocalAnalyzer {
                 log::info!("Ollama 生成成功");
                 report.push('\n');
                 report.push_str(&ai_content);
+                used_ai = true;
             }
             Err(e) => {
                 log::warn!("Ollama 调用失败，使用备选内容: {e}");
@@ -272,6 +279,9 @@ impl Analyzer for LocalAnalyzer {
             }
         }
 
-        Ok(report)
+        Ok(GeneratedReport {
+            content: report,
+            used_ai,
+        })
     }
 }

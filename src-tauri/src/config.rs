@@ -319,6 +319,18 @@ impl PrivacyConfig {
 }
 
 /// 存储配置
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
+#[serde(rename_all = "snake_case")]
+#[derive(Default)]
+pub enum ScreenshotDisplayMode {
+    /// 仅截活动窗口所在屏幕
+    #[default]
+    ActiveWindow,
+    /// 截取所有屏幕
+    All,
+}
+
+/// 存储配置
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct StorageConfig {
     /// 截图保留天数（超过后删除截图文件）
@@ -331,6 +343,9 @@ pub struct StorageConfig {
     pub jpeg_quality: u8,
     /// 最大图片宽度（超过会缩放）
     pub max_image_width: u32,
+    /// 截图屏幕范围
+    #[serde(default)]
+    pub screenshot_display_mode: ScreenshotDisplayMode,
 }
 
 impl Default for StorageConfig {
@@ -341,6 +356,7 @@ impl Default for StorageConfig {
             storage_limit_mb: 2048,       // 默认2GB上限
             jpeg_quality: 85,             // 85%质量，更清晰
             max_image_width: 1280,        // 最大宽度1280px
+            screenshot_display_mode: ScreenshotDisplayMode::ActiveWindow,
         }
     }
 }
@@ -369,6 +385,12 @@ pub struct AppConfig {
     /// 存储配置
     #[serde(default)]
     pub storage: StorageConfig,
+    /// 日报附加提示词
+    #[serde(default)]
+    pub daily_report_custom_prompt: String,
+    /// 日报 Markdown 导出目录
+    #[serde(default)]
+    pub daily_report_export_dir: Option<String>,
     /// 是否开机自启
     pub auto_start: bool,
     /// 主题模式: system, light, dark
@@ -462,6 +484,8 @@ impl Default for AppConfig {
             privacy: PrivacyConfig::default(),
             app_category_rules: Vec::new(),
             storage: StorageConfig::default(),
+            daily_report_custom_prompt: String::new(),
+            daily_report_export_dir: None,
             auto_start: false,
             theme: "system".to_string(),
             work_start_hour: 9,
@@ -496,6 +520,9 @@ impl AppConfig {
         normalize_app_category_rules(&mut self.app_category_rules);
         self.avatar_scale = normalize_avatar_scale(self.avatar_scale);
         self.avatar_opacity = normalize_avatar_opacity(self.avatar_opacity);
+        self.daily_report_custom_prompt = self.daily_report_custom_prompt.trim().to_string();
+        self.daily_report_export_dir =
+            normalize_optional_string(self.daily_report_export_dir.take());
         self.sync_text_model_profiles();
     }
 
@@ -687,11 +714,23 @@ fn normalize_avatar_opacity(value: f64) -> f64 {
     value.clamp(0.45, 1.0)
 }
 
+fn normalize_optional_string(value: Option<String>) -> Option<String> {
+    value.and_then(|raw| {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         default_avatar_opacity, default_avatar_scale, normalize_app_category_rules,
         normalize_avatar_opacity, normalize_avatar_scale, AppCategoryRule, AppConfig,
+        ScreenshotDisplayMode,
     };
 
     #[test]
@@ -723,6 +762,24 @@ mod tests {
         let config = AppConfig::default();
 
         assert!(!config.lightweight_mode);
+    }
+
+    #[test]
+    fn 日报附加提示词默认应为空且不导出() {
+        let config = AppConfig::default();
+
+        assert!(config.daily_report_custom_prompt.is_empty());
+        assert_eq!(config.daily_report_export_dir, None);
+    }
+
+    #[test]
+    fn 截图模式默认应为活动窗口所在屏幕() {
+        let config = AppConfig::default();
+
+        assert_eq!(
+            config.storage.screenshot_display_mode,
+            ScreenshotDisplayMode::ActiveWindow
+        );
     }
 
     #[test]
@@ -766,5 +823,19 @@ mod tests {
         assert_eq!(rules[0].app_name, "Firefox");
         assert_eq!(rules[0].category, "office");
         assert_eq!(rules[1].category, "other");
+    }
+
+    #[test]
+    fn 配置规范化应清理空白日报附加设置() {
+        let mut config = AppConfig {
+            daily_report_custom_prompt: "  输出需要更偏周报风格  ".to_string(),
+            daily_report_export_dir: Some("   ".to_string()),
+            ..AppConfig::default()
+        };
+
+        config.normalize();
+
+        assert_eq!(config.daily_report_custom_prompt, "输出需要更偏周报风格");
+        assert_eq!(config.daily_report_export_dir, None);
     }
 }

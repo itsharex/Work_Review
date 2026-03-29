@@ -9,6 +9,7 @@
   import { appIconStore, getIconCacheKey, preloadAppIcons } from '../../lib/stores/iconCache.js';
   import { resolveAppIconSrc } from '../../lib/utils/appVisuals.js';
   import { formatBrowserUrlForDisplay } from '../../lib/utils/browserUrl.js';
+  import { prepareTimelineActivities, upsertTimelineActivity } from './timelineData.js';
 
   // 获取本地日期（避免 UTC 时区问题）
   function getLocalDateString() {
@@ -204,32 +205,14 @@
         invoke('get_timeline', { date: selectedDate, limit: PAGE_SIZE, offset: 0 }),
         invoke('get_hourly_summaries', { date: selectedDate }),
       ]);
-      
-      // 前端去重保障：按 app_name + browser_url 合并（防止后端 GROUP BY 未生效的情况）
-      const mergedMap = new Map();
-      for (const activity of activitiesData) {
-        const key = `${activity.app_name}|${activity.browser_url || ''}`;
-        if (mergedMap.has(key)) {
-          const existing = mergedMap.get(key);
-          // 合并：保留最新时间戳、累加时长
-          existing.duration = (existing.duration || 0) + (activity.duration || 0);
-          if (activity.timestamp > existing.timestamp) {
-            existing.timestamp = activity.timestamp;
-            existing.screenshot_path = activity.screenshot_path;
-            existing.window_title = activity.window_title;
-          }
-        } else {
-          mergedMap.set(key, { ...activity });
-        }
-      }
-      // 按时间戳降序排序
-      activities = Array.from(mergedMap.values()).sort((a, b) => b.timestamp - a.timestamp);
+
+      activities = prepareTimelineActivities(activitiesData);
       
       hourlySummaries = summariesData;
       offset = activities.length;
       hasMore = activitiesData.length >= PAGE_SIZE;
       
-      // 保存到缓存（使用去重后的数据）
+      // 保存到缓存（直接使用后端返回结果）
       cache.setTimeline(selectedDate, activities, summariesData);
       
       // 预加载缩略图
@@ -398,50 +381,11 @@
     // 初始加载通过响应式触发
     
     // 监听新截屏事件，智能更新（合并或新增）
-    // 核心逻辑：后端已做合并，前端只需按 id 更新或去重
+    // 核心逻辑：后端已完成聚合，前端只按 id 替换，否则视作新活动插入
     unlisten = await listen('screenshot-taken', (event) => {
       if (isToday) {
         const newActivity = event.payload;
-        const isBrowser = newActivity.browser_url && newActivity.browser_url.length > 0;
-        
-        // 1. 优先按 id 查找是否已存在（后端合并场景）
-        const existingById = activities.findIndex(a => a.id === newActivity.id);
-        if (existingById >= 0) {
-          // 原地更新：后端已合并，前端同步更新
-          activities = activities.map(a => a.id === newActivity.id ? newActivity : a);
-          cache.clear();
-          return;
-        }
-        
-        // 2. 对于非浏览器应用，按 app_name 查找并替换（实时合并）
-        if (!isBrowser) {
-          const existingByApp = activities.findIndex(a => 
-            a.app_name === newActivity.app_name && 
-            (!a.browser_url || a.browser_url.length === 0)
-          );
-          if (existingByApp >= 0) {
-            // 替换旧记录（后端的 duration 已是合并后的值，无需前端累加）
-            activities = activities.map((a, i) => i === existingByApp ? newActivity : a);
-            cache.clear();
-            return;
-          }
-        }
-        
-        // 3. 浏览器应用按 URL 查找合并
-        if (isBrowser) {
-          const existingByUrl = activities.findIndex(a => 
-            a.browser_url === newActivity.browser_url
-          );
-          if (existingByUrl >= 0) {
-            // 替换旧记录
-            activities = activities.map((a, i) => i === existingByUrl ? newActivity : a);
-            cache.clear();
-            return;
-          }
-        }
-        
-        // 4. 真正的新记录：添加到开头
-        activities = [newActivity, ...activities];
+        activities = upsertTimelineActivity(activities, newActivity);
         cache.clear();
       }
     });

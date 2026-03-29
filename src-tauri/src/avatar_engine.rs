@@ -12,7 +12,7 @@ const AVATAR_SCALE_MIN: f64 = 0.7;
 const AVATAR_SCALE_MAX: f64 = 1.3;
 const AVATAR_SCALE_DEFAULT: f64 = 0.9;
 const AVATAR_OPACITY_DEFAULT: f64 = 0.82;
-const AVATAR_WINDOW_BASE_WIDTH: f64 = 152.0;
+const AVATAR_WINDOW_BASE_WIDTH: f64 = 276.0;
 const AVATAR_WINDOW_BASE_HEIGHT: f64 = 170.0;
 const AVATAR_WINDOW_WIDTH: f64 = AVATAR_WINDOW_BASE_WIDTH * AVATAR_SCALE_DEFAULT;
 const AVATAR_WINDOW_HEIGHT: f64 = AVATAR_WINDOW_BASE_HEIGHT * AVATAR_SCALE_DEFAULT;
@@ -322,7 +322,9 @@ pub fn sync_avatar_window(
         ensure_avatar_window(app, scale)?;
         if let Some(window) = app.get_webview_window(AVATAR_WINDOW_LABEL) {
             let normalized_scale = normalize_avatar_scale(scale);
-            let (x, y) = default_avatar_position(app, normalized_scale, saved_position);
+            let current_position = window.outer_position().ok().map(|position| (position.x, position.y));
+            let (x, y) =
+                default_avatar_position(app, normalized_scale, current_position.or(saved_position));
             resize_avatar_window(&window, normalized_scale);
             let _ = window.set_always_on_top(true);
             let _ = window.set_visible_on_all_workspaces(true);
@@ -729,7 +731,7 @@ mod tests {
         assert!(small_h < default_h);
         assert!(large_w > default_w);
         assert!(large_h > default_h);
-        assert_eq!((default_w, default_h), (136.8, 153.0));
+        assert_eq!((default_w, default_h), (248.4, 153.0));
     }
 
     #[test]

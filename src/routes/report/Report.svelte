@@ -1,8 +1,11 @@
 <script>
   import { onMount } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
+  import { open } from '@tauri-apps/plugin-shell';
   import { marked } from 'marked';
+  import { showToast } from '../../lib/stores/toast.js';
   import { cache } from '../../lib/stores/cache.js';
+  import { shouldShowPromptAppliedToast } from './reportPromptFeedback.js';
 
   function getLocalDateString() {
     const now = new Date();
@@ -23,15 +26,40 @@
   let isYesterdayReport = false; // 标记是否显示的是昨日日报
   let config = null; // 当前配置
   let lastLoadedDate = '';
+  let exportInProgress = false;
+  let promptSaving = false;
 
   // 获取 AI 模式显示名称
   function getAiModeName(mode) {
+    const normalizedMode = (mode || '').toString().trim().toLowerCase();
     const modeNames = {
       'local': '基础模板',
       'summary': 'AI 增强',
       'cloud': '云端分析'
     };
-    return modeNames[mode] || mode || '未知';
+    return modeNames[normalizedMode] || mode || '未知';
+  }
+
+  function resolveReportMeta(reportData, currentConfig) {
+    const fallbackHint = reportData?.content || '';
+    let aiMode = reportData?.ai_mode || currentConfig?.ai_mode || '';
+    let modelName = reportData?.model_name || null;
+
+    aiMode = (aiMode || '').toString().trim().toLowerCase();
+
+    if (
+      fallbackHint.includes('由基础模板生成') ||
+      fallbackHint.includes('使用基础模板生成')
+    ) {
+      aiMode = 'local';
+      modelName = null;
+    }
+
+    if (!reportData && currentConfig?.ai_mode === 'summary' && currentConfig?.text_model?.model) {
+      modelName = currentConfig.text_model.model;
+    }
+
+    return { aiMode, modelName };
   }
 
   async function loadConfig() {
@@ -112,11 +140,25 @@
     generating = true;
     error = null;
     try {
+      if (config?.ai_mode === 'summary') {
+        await persistReportPrompt();
+      }
       // 只有强制生成的时候才会覆盖已有日报（后端默认规则，这里force指定传入）。
-      const content = await invoke('generate_report', { date: selectedDate, force });
-      report = { date: selectedDate, content, created_at: Date.now() / 1000 };
+      await invoke('generate_report', { date: selectedDate, force });
+      const savedReport = await invoke('get_saved_report', { date: selectedDate });
+      report = savedReport || { date: selectedDate, content: '', created_at: Date.now() / 1000 };
       isYesterdayReport = false;
       cache.setReport(selectedDate, report);
+
+      if (
+        shouldShowPromptAppliedToast({
+          configAiMode: config?.ai_mode,
+          customPrompt: config?.daily_report_custom_prompt,
+          reportAiMode: savedReport?.ai_mode,
+        })
+      ) {
+        showToast('已应用附加提示词', 'success');
+      }
     } catch (e) {
       error = e.toString();
     } finally {
@@ -124,8 +166,68 @@
     }
   }
 
+  async function persistReportPrompt() {
+    if (!config || config.ai_mode !== 'summary' || promptSaving) {
+      return;
+    }
+
+    promptSaving = true;
+    try {
+      config.daily_report_custom_prompt = (config.daily_report_custom_prompt || '').trim();
+      await invoke('save_config', { config });
+    } finally {
+      promptSaving = false;
+    }
+  }
+
+  async function exportReportMarkdown() {
+    if (!report) return;
+
+    exportInProgress = true;
+    try {
+      const exportPath = await invoke('export_report_markdown', {
+        date: report.date || selectedDate,
+        content: report.content,
+      });
+      showToast(`日报已导出到 ${exportPath}`, 'success');
+    } catch (e) {
+      showToast(`导出失败: ${e}`, 'error');
+    } finally {
+      exportInProgress = false;
+    }
+  }
+
   function renderMarkdown(content) {
     return marked(content);
+  }
+
+  async function handleReportLinkClick(event) {
+    const link = event.target.closest('a[href]');
+    if (!link) return;
+
+    const href = link.getAttribute('href');
+    if (!href || href.startsWith('#')) return;
+
+    event.preventDefault();
+    try {
+      await open(href);
+    } catch (e) {
+      console.error('打开日报链接失败:', e);
+    }
+  }
+
+  function interceptReportLinks(node) {
+    const listener = (event) => {
+      handleReportLinkClick(event);
+    };
+
+    node.addEventListener('click', listener);
+
+    return {
+      destroy() {
+        node.removeEventListener('click', listener);
+      }
+    };
   }
 
   function formatReportDate(dateStr) {
@@ -139,6 +241,8 @@
     isYesterdayReport = false;
     loadReport();
   }
+
+  $: reportMeta = resolveReportMeta(report, config);
 
   onMount(() => {
     loadConfig();
@@ -161,13 +265,13 @@
         </h2>
         <p>
         {formatReportDate(selectedDate)}
-        {#if config}
-          <span class="ml-1.5 {config.ai_mode === 'summary' ? 'page-inline-chip-brand' : 'page-inline-chip-muted'}">
-            {getAiModeName(config.ai_mode)}
+        {#if config || report}
+          <span class="ml-1.5 {reportMeta.aiMode === 'summary' ? 'page-inline-chip-brand' : 'page-inline-chip-muted'}">
+            {getAiModeName(reportMeta.aiMode)}
           </span>
-          {#if config.ai_mode === 'summary' && config.text_model?.model}
+          {#if reportMeta.aiMode === 'summary' && reportMeta.modelName}
             <span class="ml-1 page-inline-chip-muted">
-              {config.text_model.model}
+              {reportMeta.modelName}
             </span>
           {/if}
         {/if}
@@ -196,25 +300,66 @@
         />
       </div>
       <span class="page-help-text">可切换到任意历史日期查看历史日报</span>
-      {#if report}
-        <button
-          class="page-action-warn"
-          on:click={() => generateReport(true)}
-          disabled={generating}
-        >
-          {#if generating}
-            <div class="animate-spin rounded-full h-4 w-4 border-2 border-white border-t-transparent"></div>
-            生成中...
-          {:else}
-            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-            </svg>
-            重新生成
-          {/if}
-        </button>
-      {/if}
+      <div class="flex flex-wrap justify-end gap-2">
+        {#if report}
+          <button
+            class="page-action-secondary min-h-10 px-4 py-2"
+            on:click={exportReportMarkdown}
+            disabled={exportInProgress || !config?.daily_report_export_dir}
+            title={config?.daily_report_export_dir ? '' : '请先在设置中配置日报 Markdown 导出目录'}
+          >
+            {#if exportInProgress}
+              <div class="animate-spin rounded-full h-4 w-4 border-2 border-current border-t-transparent"></div>
+              导出中...
+            {:else}
+              导出 Markdown
+            {/if}
+          </button>
+          <button
+            class="page-action-warn"
+            on:click={() => generateReport(true)}
+            disabled={generating}
+          >
+            {#if generating}
+              <div class="animate-spin rounded-full h-4 w-4 border-2 border-white border-t-transparent"></div>
+              生成中...
+            {:else}
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+              </svg>
+              重新生成
+            {/if}
+          </button>
+        {/if}
+      </div>
     </div>
   </div>
+
+  {#if config}
+    <div class="page-card">
+      <h3 class="settings-card-title">生成选项</h3>
+      {#if config.ai_mode === 'summary'}
+        <div class="space-y-3">
+          <div>
+            <label for="daily-report-custom-prompt" class="settings-label mb-1.5">日报附加提示词</label>
+            <textarea
+              id="daily-report-custom-prompt"
+              bind:value={config.daily_report_custom_prompt}
+              on:change={persistReportPrompt}
+              rows="4"
+              class="control-input resize-y min-h-[110px]"
+              placeholder="例如：先给结论再展开；更偏周报口吻；突出产出、风险和下一步。"
+            ></textarea>
+          </div>
+          <p class="settings-note">
+            仅 AI 增强模式生效。这里填写的是附加要求，不会覆盖系统默认的日报结构和基础约束。
+          </p>
+        </div>
+      {:else}
+        <p class="settings-empty">当前是基础模板模式，附加提示词仅在「AI 增强」模式下生效。</p>
+      {/if}
+    </div>
+  {/if}
 
   <!-- 日报内容 -->
   {#if loading}
@@ -266,7 +411,10 @@
         <div class="w-1.5 h-1.5 rounded-full {isYesterdayReport ? 'bg-amber-500' : 'bg-emerald-500'}"></div>
         {isYesterdayReport ? '昨日日报 - ' : ''}生成于 {new Date(report.created_at * 1000).toLocaleString('zh-CN')}
       </div>
-      <div class="markdown-body prose prose-slate dark:prose-invert max-w-none">
+      <div
+        use:interceptReportLinks
+        class="markdown-body prose prose-slate dark:prose-invert max-w-none"
+      >
         {@html renderMarkdown(report.content)}
       </div>
     </div>

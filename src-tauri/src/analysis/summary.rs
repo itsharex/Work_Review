@@ -1,4 +1,4 @@
-use crate::analysis::{format_duration, Analyzer};
+use crate::analysis::{append_custom_prompt, format_duration, Analyzer, GeneratedReport};
 use crate::config::AiProvider;
 use crate::database::{Activity, DailyStats};
 use crate::error::{AppError, Result};
@@ -15,11 +15,18 @@ pub struct SummaryAnalyzer {
     endpoint: String,
     model: String,
     api_key: Option<String>,
+    custom_prompt: String,
     client: Client,
 }
 
 impl SummaryAnalyzer {
-    pub fn new(provider: AiProvider, endpoint: &str, model: &str, api_key: Option<&str>) -> Self {
+    pub fn new(
+        provider: AiProvider,
+        endpoint: &str,
+        model: &str,
+        api_key: Option<&str>,
+        custom_prompt: &str,
+    ) -> Self {
         // 创建带超时配置的 HTTP 客户端
         let client = Client::builder()
             .timeout(Duration::from_secs(90)) // 综合超时时间
@@ -32,6 +39,7 @@ impl SummaryAnalyzer {
             endpoint: endpoint.to_string(),
             model: model.to_string(),
             api_key: api_key.map(|s| s.to_string()),
+            custom_prompt: custom_prompt.to_string(),
             client,
         }
     }
@@ -355,7 +363,7 @@ impl Analyzer for SummaryAnalyzer {
         stats: &DailyStats,
         activities: &[Activity],
         _screenshots_dir: &Path,
-    ) -> Result<String> {
+    ) -> Result<GeneratedReport> {
         log::info!("生成混合模式日报：固定模板 + AI 扩展");
 
         let mut report = String::new();
@@ -456,7 +464,8 @@ impl Analyzer for SummaryAnalyzer {
         let top_keywords = keywords.into_iter().take(8).collect::<Vec<_>>().join(", ");
 
         // 规整的 AI 提示词（站在共同度过工作一天的角度，深入分析数据）
-        let prompt = format!(
+        let prompt = append_custom_prompt(
+            format!(
             r#"你是用户今天的工作伙伴，陪伴用户度过了这一天。请仔细分析以下数据，提炼出有价值的洞察，生成一份温暖亲切的工作回顾。
 
 【今日原始数据】
@@ -511,19 +520,27 @@ impl Analyzer for SummaryAnalyzer {
             } else {
                 top_keywords
             }
+        ),
+            &self.custom_prompt,
         );
 
         // 调用 AI
-        let ai_content = match self.generate_ai_content(&prompt).await {
-            Ok(content) => content.trim().to_string(),
+        let (ai_content, used_ai) = match self.generate_ai_content(&prompt).await {
+            Ok(content) => (content.trim().to_string(), true),
             Err(e) => {
                 log::warn!("AI 生成失败: {e}");
-                self.generate_fallback_ai_content(&[], &apps_list)
+                (
+                    self.generate_fallback_ai_content(&[], &apps_list),
+                    false,
+                )
             }
         };
 
         report.push_str(&ai_content);
 
-        Ok(report)
+        Ok(GeneratedReport {
+            content: report,
+            used_ai,
+        })
     }
 }

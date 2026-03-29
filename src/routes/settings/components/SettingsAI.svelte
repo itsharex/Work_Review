@@ -38,6 +38,7 @@
   let textTestStatus = null;
   let textTestMessage = '';
   let textConnectionVerified = false;
+  let showApiKey = false;
   
   const unsubscribe = aiStore.subscribe(state => {
     textTestStatus = state.textTestStatus;
@@ -254,14 +255,41 @@
     {#if requiresApiKey}
       <div>
         <label for="ai-apikey" class="settings-label mb-1.5">API 密钥</label>
-        <input
-          id="ai-apikey"
-          type="password"
-          bind:value={config.text_model.api_key}
-          on:change={handleChange}
-          class="control-input"
-          placeholder="sk-..."
-        />
+        <div class="relative">
+          {#if showApiKey}
+            <input
+              id="ai-apikey"
+              type="text"
+              bind:value={config.text_model.api_key}
+              on:change={handleChange}
+              class="control-input pr-12"
+              placeholder="sk-..."
+            />
+          {:else}
+            <input
+              id="ai-apikey"
+              type="password"
+              bind:value={config.text_model.api_key}
+              on:change={handleChange}
+              class="control-input pr-12"
+              placeholder="sk-..."
+            />
+          {/if}
+          <button
+            type="button"
+            class="absolute inset-y-0 right-3 inline-flex items-center justify-center text-slate-400 transition hover:text-slate-600 dark:text-slate-500 dark:hover:text-slate-300"
+            aria-label={showApiKey ? '隐藏 API 密钥' : '显示 API 密钥'}
+            title={showApiKey ? '隐藏 API 密钥' : '显示 API 密钥'}
+            on:click={() => {
+              showApiKey = !showApiKey;
+            }}
+          >
+            <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M2.25 12s3.75-6.75 9.75-6.75S21.75 12 21.75 12 18 18.75 12 18.75 2.25 12 2.25 12Z" />
+              <circle cx="12" cy="12" r="3.25" />
+            </svg>
+          </button>
+        </div>
       </div>
     {/if}
 

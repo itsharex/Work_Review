@@ -63,15 +63,35 @@
       if (!config.text_model_profiles) {
         config.text_model_profiles = [];
       }
+      if (typeof config.daily_report_custom_prompt !== 'string') {
+        config.daily_report_custom_prompt = '';
+      }
+      if (typeof config.daily_report_export_dir !== 'string' && config.daily_report_export_dir !== null) {
+        config.daily_report_export_dir = null;
+      }
       if (!config.vision_model) {
         config.vision_model = { provider: 'ollama', endpoint: 'http://localhost:11434', api_key: null, model: 'llava' };
       }
       if (typeof config.lightweight_mode !== 'boolean') {
         config.lightweight_mode = false;
       }
+      if (!config.storage) {
+        config.storage = {
+          screenshot_retention_days: 7,
+          metadata_retention_days: 30,
+          storage_limit_mb: 2048,
+          jpeg_quality: 85,
+          max_image_width: 1280,
+          screenshot_display_mode: 'active_window',
+        };
+      }
+      if (!config.storage.screenshot_display_mode) {
+        config.storage.screenshot_display_mode = 'active_window';
+      }
       if (!config.app_category_rules) config.app_category_rules = [];
       if (!config.privacy.app_rules) config.privacy.app_rules = [];
-      if (!config.privacy.sensitive_keywords) config.privacy.sensitive_keywords = [];
+      if (!config.privacy.excluded_keywords) config.privacy.excluded_keywords = [];
+      delete config.privacy.sensitive_keywords;
     } catch (e) {
       error = e.toString();
       console.error('加载配置失败:', e);
@@ -107,6 +127,7 @@
     success = false;
 
     try {
+      delete config.privacy?.sensitive_keywords;
       await invoke('save_config', { config });
       success = true;
       cache.setConfig(config);

@@ -1,4 +1,4 @@
-use crate::analysis::{generate_stats_summary, Analyzer};
+use crate::analysis::{append_custom_prompt, generate_stats_summary, Analyzer, GeneratedReport};
 use crate::database::{Activity, DailyStats};
 use crate::error::{AppError, Result};
 use async_trait::async_trait;
@@ -13,11 +13,12 @@ use std::time::Duration;
 pub struct CloudAnalyzer {
     api_key: String,
     model: String,
+    custom_prompt: String,
     client: Client,
 }
 
 impl CloudAnalyzer {
-    pub fn new(api_key: &str, model: &str) -> Self {
+    pub fn new(api_key: &str, model: &str, custom_prompt: &str) -> Self {
         // 创建带超时配置的 HTTP 客户端
         let client = Client::builder()
             .timeout(Duration::from_secs(60)) // OpenAI API 超时设置为60秒
@@ -28,6 +29,7 @@ impl CloudAnalyzer {
         Self {
             api_key: api_key.to_string(),
             model: model.to_string(),
+            custom_prompt: custom_prompt.to_string(),
             client,
         }
     }
@@ -100,7 +102,8 @@ impl CloudAnalyzer {
             .join("\n");
 
         // 让 AI 自由发挥，不设置固定模板格式
-        let prompt = format!(
+        let prompt = append_custom_prompt(
+            format!(
             r#"以下是一位打工人今天的工作数据：
 
 {stats_summary}
@@ -118,6 +121,8 @@ impl CloudAnalyzer {
 - 或者任何你认为有价值的洞察
 
 用 Markdown 格式书写，不需要遵循固定的模板，让这份报告既专业又有趣。"#
+        ),
+            &self.custom_prompt,
         );
 
         let response = self.client
@@ -164,7 +169,7 @@ impl Analyzer for CloudAnalyzer {
         stats: &DailyStats,
         activities: &[Activity],
         screenshots_dir: &Path,
-    ) -> Result<String> {
+    ) -> Result<GeneratedReport> {
         if self.api_key.is_empty() {
             return Err(AppError::Analysis("OpenAI API Key 未配置".to_string()));
         }
@@ -201,6 +206,9 @@ impl Analyzer for CloudAnalyzer {
         }
 
         // 生成最终报告
-        self.generate_final_report(date, stats, &insights).await
+        Ok(GeneratedReport {
+            content: self.generate_final_report(date, stats, &insights).await?,
+            used_ai: true,
+        })
     }
 }

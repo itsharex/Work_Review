@@ -1,6 +1,7 @@
+use crate::config::{ScreenshotDisplayMode, StorageConfig};
 use crate::error::{AppError, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
-use image::{imageops::FilterType, ColorType, DynamicImage};
+use image::{imageops::FilterType, ColorType, DynamicImage, RgbaImage};
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 
@@ -84,6 +85,8 @@ pub struct ScreenshotConfig {
     pub max_width: u32,
     /// JPEG 质量 (1-100)
     pub jpeg_quality: u8,
+    /// 截图范围模式
+    pub display_mode: ScreenshotDisplayMode,
 }
 
 impl Default for ScreenshotConfig {
@@ -91,6 +94,17 @@ impl Default for ScreenshotConfig {
         Self {
             max_width: 1440,
             jpeg_quality: 70,
+            display_mode: ScreenshotDisplayMode::ActiveWindow,
+        }
+    }
+}
+
+impl From<&StorageConfig> for ScreenshotConfig {
+    fn from(value: &StorageConfig) -> Self {
+        Self {
+            max_width: value.max_image_width.max(320),
+            jpeg_quality: value.jpeg_quality.clamp(30, 95),
+            display_mode: value.screenshot_display_mode,
         }
     }
 }
@@ -102,11 +116,15 @@ pub struct ScreenshotService {
 }
 
 impl ScreenshotService {
-    pub fn new(data_dir: &Path) -> Self {
+    pub fn new(data_dir: &Path, storage_config: &StorageConfig) -> Self {
         Self {
             data_dir: data_dir.to_path_buf(),
-            config: ScreenshotConfig::default(),
+            config: ScreenshotConfig::from(storage_config),
         }
+    }
+
+    pub fn update_config(&mut self, storage_config: &StorageConfig) {
+        self.config = ScreenshotConfig::from(storage_config);
     }
 
     #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -146,6 +164,15 @@ impl ScreenshotService {
         std::fs::create_dir_all(&screenshots_dir)?;
 
         let final_jpg = screenshots_dir.join(format!("{time_str}.jpg"));
+
+        if should_capture_all_displays(&self.config) {
+            return match self.capture_with_gdi(None) {
+                Ok((pixels, width, height)) => {
+                    self.save_rgba_to_jpeg(&pixels, width, height, &final_jpg, now.timestamp())
+                }
+                Err(e) => Err(AppError::Screenshot(format!("全屏幕截图失败: {e}"))),
+            };
+        }
 
         // 先尝试 Windows Graphics Capture API
         match self.capture_with_wgc(&screenshots_dir, &time_str, active_window) {
@@ -357,10 +384,20 @@ impl ScreenshotService {
             BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDIBits,
             SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, SRCCOPY,
         };
-        use winapi::um::winuser::{GetDC, GetSystemMetrics, ReleaseDC, SM_CXSCREEN, SM_CYSCREEN};
+        use winapi::um::winuser::{
+            GetDC, GetSystemMetrics, ReleaseDC, SM_CXSCREEN, SM_CXVIRTUALSCREEN, SM_CYSCREEN,
+            SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+        };
 
         unsafe {
-            let (source_x, source_y, width, height) =
+            let (source_x, source_y, width, height) = if should_capture_all_displays(&self.config) {
+                (
+                    GetSystemMetrics(SM_XVIRTUALSCREEN),
+                    GetSystemMetrics(SM_YVIRTUALSCREEN),
+                    GetSystemMetrics(SM_CXVIRTUALSCREEN) as u32,
+                    GetSystemMetrics(SM_CYVIRTUALSCREEN) as u32,
+                )
+            } else {
                 capture_target_monitor_rect(active_window).unwrap_or_else(|| {
                     (
                         0,
@@ -368,7 +405,8 @@ impl ScreenshotService {
                         GetSystemMetrics(SM_CXSCREEN) as u32,
                         GetSystemMetrics(SM_CYSCREEN) as u32,
                     )
-                });
+                })
+            };
 
             if width == 0 || height == 0 {
                 return Err(AppError::Screenshot("获取屏幕尺寸失败".to_string()));
@@ -598,39 +636,48 @@ impl ScreenshotService {
     ) -> Result<ScreenshotResult> {
         use screenshots::Screen;
 
-        let screen = if let Some((x, y)) = capture_target_point(active_window) {
-            match Screen::from_point(x, y) {
-                Ok(screen) => screen,
-                Err(e) => {
-                    log::warn!("按窗口坐标选屏失败，将回退到默认屏幕: {e}");
-                    let screens = Screen::all()
-                        .map_err(|err| AppError::Screenshot(format!("获取屏幕列表失败: {err}")))?;
-                    screens
-                        .first()
-                        .copied()
-                        .ok_or_else(|| AppError::Screenshot("没有找到屏幕".to_string()))?
-                }
-            }
+        let mut dynamic_image = if should_capture_all_displays(&self.config) {
+            self.capture_all_displays_macos()?
         } else {
-            let screens = Screen::all()
-                .map_err(|e| AppError::Screenshot(format!("获取屏幕列表失败: {e}")))?;
-            screens
-                .first()
-                .copied()
-                .ok_or_else(|| AppError::Screenshot("没有找到屏幕".to_string()))?
+            let screen = if let Some((x, y)) = capture_target_point(active_window) {
+                match Screen::from_point(x, y) {
+                    Ok(screen) => screen,
+                    Err(e) => {
+                        log::warn!("按窗口坐标选屏失败，将回退到默认屏幕: {e}");
+                        let screens = Screen::all()
+                            .map_err(|err| {
+                                AppError::Screenshot(format!("获取屏幕列表失败: {err}"))
+                            })?;
+                        screens
+                            .first()
+                            .copied()
+                            .ok_or_else(|| AppError::Screenshot("没有找到屏幕".to_string()))?
+                    }
+                }
+            } else {
+                let screens = Screen::all()
+                    .map_err(|e| AppError::Screenshot(format!("获取屏幕列表失败: {e}")))?;
+                screens
+                    .first()
+                    .copied()
+                    .ok_or_else(|| AppError::Screenshot("没有找到屏幕".to_string()))?
+            };
+
+            let image = screen
+                .capture()
+                .map_err(|e| AppError::Screenshot(format!("截屏失败: {e}")))?;
+
+            let orig_width = image.width();
+            let orig_height = image.height();
+
+            DynamicImage::ImageRgba8(
+                image::RgbaImage::from_raw(orig_width, orig_height, image.into_raw())
+                    .ok_or_else(|| AppError::Screenshot("图像转换失败".to_string()))?,
+            )
         };
 
-        let image = screen
-            .capture()
-            .map_err(|e| AppError::Screenshot(format!("截屏失败: {e}")))?;
-
-        let orig_width = image.width();
-        let orig_height = image.height();
-
-        let mut dynamic_image = DynamicImage::ImageRgba8(
-            image::RgbaImage::from_raw(orig_width, orig_height, image.into_raw())
-                .ok_or_else(|| AppError::Screenshot("图像转换失败".to_string()))?,
-        );
+        let orig_width = dynamic_image.width();
+        let orig_height = dynamic_image.height();
 
         if orig_width > self.config.max_width {
             let scale = self.config.max_width as f32 / orig_width as f32;
@@ -681,6 +728,68 @@ impl ScreenshotService {
             width: final_width,
             height: final_height,
         })
+    }
+
+    #[cfg(target_os = "macos")]
+    fn capture_all_displays_macos(&self) -> Result<DynamicImage> {
+        use screenshots::Screen;
+
+        let screens = Screen::all()
+            .map_err(|e| AppError::Screenshot(format!("获取屏幕列表失败: {e}")))?;
+        if screens.is_empty() {
+            return Err(AppError::Screenshot("没有找到屏幕".to_string()));
+        }
+
+        let mut captured_images = Vec::new();
+        let mut min_x = i32::MAX;
+        let mut min_y = i32::MAX;
+        let mut max_x = i32::MIN;
+        let mut max_y = i32::MIN;
+
+        for screen in screens {
+            let image = screen
+                .capture()
+                .map_err(|e| AppError::Screenshot(format!("截屏失败: {e}")))?;
+            let image = RgbaImage::from_raw(image.width(), image.height(), image.into_raw())
+                .ok_or_else(|| AppError::Screenshot("多屏图像转换失败".to_string()))?;
+            let offset_x =
+                display_pixel_offset(screen.display_info.x, screen.display_info.scale_factor);
+            let offset_y =
+                display_pixel_offset(screen.display_info.y, screen.display_info.scale_factor);
+            let width = image.width() as i32;
+            let height = image.height() as i32;
+
+            min_x = min_x.min(offset_x);
+            min_y = min_y.min(offset_y);
+            max_x = max_x.max(offset_x + width);
+            max_y = max_y.max(offset_y + height);
+
+            captured_images.push((offset_x, offset_y, width as u32, height as u32, image.into_raw()));
+        }
+
+        let canvas_width = (max_x - min_x).max(1) as u32;
+        let canvas_height = (max_y - min_y).max(1) as u32;
+        let mut canvas = RgbaImage::new(canvas_width, canvas_height);
+
+        for (offset_x, offset_y, width, height, raw_pixels) in captured_images {
+            let start_x = (offset_x - min_x) as u32;
+            let start_y = (offset_y - min_y) as u32;
+
+            for y in 0..height {
+                for x in 0..width {
+                    let pixel_index = ((y * width + x) * 4) as usize;
+                    let pixel = image::Rgba([
+                        raw_pixels[pixel_index],
+                        raw_pixels[pixel_index + 1],
+                        raw_pixels[pixel_index + 2],
+                        raw_pixels[pixel_index + 3],
+                    ]);
+                    canvas.put_pixel(start_x + x, start_y + y, pixel);
+                }
+            }
+        }
+
+        Ok(DynamicImage::ImageRgba8(canvas))
     }
 
     /// 执行截屏（Linux X11，使用 scrot 或 import）
@@ -857,6 +966,14 @@ fn capture_target_point(
     ))
 }
 
+fn should_capture_all_displays(config: &ScreenshotConfig) -> bool {
+    config.display_mode == ScreenshotDisplayMode::All
+}
+
+fn display_pixel_offset(value: i32, scale_factor: f32) -> i32 {
+    ((value as f32) * scale_factor.max(1.0)).round() as i32
+}
+
 #[cfg(target_os = "windows")]
 fn capture_target_monitor(
     active_window: Option<&crate::monitor::ActiveWindow>,
@@ -926,8 +1043,10 @@ fn capture_target_hmonitor(
 
 #[cfg(test)]
 mod tests {
-    use super::capture_target_point;
+    use super::{capture_target_point, should_capture_all_displays, ScreenshotService};
+    use crate::config::{ScreenshotDisplayMode, StorageConfig};
     use crate::monitor::{ActiveWindow, WindowBounds};
+    use std::path::Path;
 
     #[test]
     fn 应按窗口中心点选择目标屏幕() {
@@ -962,5 +1081,34 @@ mod tests {
 
         assert_eq!(capture_target_point(Some(&active_window)), None);
         assert_eq!(capture_target_point(None), None);
+    }
+
+    #[test]
+    fn 截图服务应继承存储配置中的显示模式与压缩参数() {
+        let storage = StorageConfig {
+            jpeg_quality: 92,
+            max_image_width: 2048,
+            screenshot_display_mode: ScreenshotDisplayMode::All,
+            ..StorageConfig::default()
+        };
+
+        let service = ScreenshotService::new(Path::new("."), &storage);
+
+        assert_eq!(service.config.jpeg_quality, 92);
+        assert_eq!(service.config.max_width, 2048);
+        assert!(should_capture_all_displays(&service.config));
+    }
+
+    #[test]
+    fn 更新截图配置后应切换显示模式() {
+        let mut service = ScreenshotService::new(Path::new("."), &StorageConfig::default());
+        let updated_storage = StorageConfig {
+            screenshot_display_mode: ScreenshotDisplayMode::All,
+            ..StorageConfig::default()
+        };
+
+        service.update_config(&updated_storage);
+
+        assert_eq!(service.config.display_mode, ScreenshotDisplayMode::All);
     }
 }

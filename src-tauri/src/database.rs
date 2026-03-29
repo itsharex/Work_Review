@@ -303,6 +303,22 @@ impl Database {
         Ok(db)
     }
 
+    /// 备份数据库到目标路径
+    pub fn backup_to(&self, db_path: &Path) -> Result<()> {
+        if let Some(parent) = db_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        let conn = self.conn.lock().map_err(|e| {
+            AppError::Database(rusqlite::Error::InvalidParameterName(e.to_string()))
+        })?;
+
+        let target = db_path.to_string_lossy().replace('\'', "''");
+        conn.execute_batch("PRAGMA wal_checkpoint(FULL);")?;
+        conn.execute_batch(&format!("VACUUM INTO '{target}';"))?;
+        Ok(())
+    }
+
     /// 初始化数据库表
     fn init_tables(&self) -> Result<()> {
         let conn = self.conn.lock().map_err(|e| {
@@ -2343,5 +2359,60 @@ mod tests {
             .all(|activity| activity.semantic_confidence == Some(88)));
 
         let _ = std::fs::remove_file(db_path);
+    }
+
+    #[test]
+    fn 数据库备份应保留活动与日报数据() {
+        let source_path = temp_db_path("backup-source");
+        let backup_path = temp_db_path("backup-target");
+        let db = Database::new(&source_path).expect("创建源数据库失败");
+        let now = chrono::Local::now().timestamp();
+        let date = chrono::Local::now().format("%Y-%m-%d").to_string();
+
+        db.insert_activity(&Activity {
+            id: None,
+            timestamp: now,
+            app_name: "Windows Terminal".to_string(),
+            window_title: "npm run tauri dev".to_string(),
+            screenshot_path: "term.jpg".to_string(),
+            ocr_text: Some("cargo check".to_string()),
+            category: "development".to_string(),
+            duration: 120,
+            browser_url: None,
+            executable_path: Some(
+                r"C:\Users\wmy\AppData\Local\Microsoft\WindowsApps\wt.exe".to_string(),
+            ),
+            semantic_category: Some("编码开发".to_string()),
+            semantic_confidence: Some(88),
+        })
+        .expect("插入活动失败");
+
+        db.save_report(&super::DailyReport {
+            date: date.clone(),
+            content: "# 工作日报\n\n今天主要在修 bug。".to_string(),
+            ai_mode: "summary".to_string(),
+            model_name: Some("gpt-4.1".to_string()),
+            created_at: now,
+        })
+        .expect("保存日报失败");
+
+        db.backup_to(&backup_path).expect("执行数据库备份失败");
+
+        let restored = Database::new(&backup_path).expect("打开备份数据库失败");
+        let activity = restored
+            .get_last_activity_by_app("Windows Terminal")
+            .expect("读取备份活动失败")
+            .expect("备份后未找到活动");
+        let report = restored
+            .get_report(&date)
+            .expect("读取备份日报失败")
+            .expect("备份后未找到日报");
+
+        assert_eq!(activity.window_title, "npm run tauri dev");
+        assert_eq!(activity.screenshot_path, "term.jpg");
+        assert_eq!(report.content, "# 工作日报\n\n今天主要在修 bug。");
+
+        let _ = std::fs::remove_file(source_path);
+        let _ = std::fs::remove_file(backup_path);
     }
 }

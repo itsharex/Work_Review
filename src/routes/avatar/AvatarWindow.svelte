@@ -170,7 +170,7 @@
 <div class="relative h-screen w-screen overflow-visible bg-transparent select-none">
   <AvatarPopover {bubble} />
 
-  <div class="h-full w-full">
+  <div class="h-full w-[54%]">
     <AvatarCanvas
       {state}
       {transitionClass}

@@ -25,11 +25,13 @@ const GITHUB_LATEST_RELEASE_API: &str =
 const GITHUB_LATEST_RELEASE_PAGE: &str = "https://github.com/wm94i/Work_Review/releases/latest";
 const UPDATE_STATUS_EVENT: &str = "update-status";
 const UPDATER_JSON_ENDPOINTS: &[&str] = &[
+    "https://github.com/wm94i/Work_Review/releases/latest/download/updater.json",
     "https://ghproxy.cn/https://github.com/wm94i/Work_Review/releases/latest/download/updater-ghproxy.json",
     "https://ghp.ci/https://github.com/wm94i/Work_Review/releases/latest/download/updater-ghp.json",
-    "https://github.com/wm94i/Work_Review/releases/latest/download/updater.json",
 ];
 const DEFAULT_UPDATE_CHECK_INTERVAL_HOURS: u64 = 24;
+const UPDATE_REQUEST_TIMEOUT_SECS: u64 = 35;
+const UPDATE_CONNECT_TIMEOUT_SECS: u64 = 12;
 const MANAGED_DATA_ENTRIES: &[&str] = &[
     "config.json",
     "workreview.db",
@@ -38,6 +40,7 @@ const MANAGED_DATA_ENTRIES: &[&str] = &[
     "background.jpg",
     "update_settings.json",
 ];
+const LIVE_DATABASE_FILES: &[&str] = &["workreview.db", "workreview.db-shm", "workreview.db-wal"];
 
 /// 模型测试结果
 #[derive(Serialize, Deserialize, Debug)]
@@ -160,6 +163,43 @@ fn update_source_label(endpoint: &str) -> String {
         .ok()
         .and_then(|url| url.host_str().map(|host| host.to_string()))
         .unwrap_or_else(|| endpoint.to_string())
+}
+
+fn resolve_saved_report_metadata(
+    configured_mode: &crate::config::AiMode,
+    configured_model_name: &str,
+    used_ai: bool,
+) -> (String, Option<String>) {
+    let configured_mode = format!("{configured_mode:?}").to_lowercase();
+
+    match (configured_mode.as_str(), used_ai) {
+        ("summary", false) => ("local".to_string(), None),
+        ("cloud", false) => ("local".to_string(), None),
+        (_, false) => (configured_mode, None),
+        _ => {
+            let model_name = configured_model_name.trim();
+            (
+                configured_mode,
+                if model_name.is_empty() {
+                    None
+                } else {
+                    Some(model_name.to_string())
+                },
+            )
+        }
+    }
+}
+
+fn build_daily_report_export_path(export_dir: &Path, date: &str) -> PathBuf {
+    let safe_date = date.replace('/', "-").replace('\\', "-");
+    export_dir.join(format!("{safe_date}.md"))
+}
+
+fn export_daily_report_markdown(export_dir: &Path, date: &str, content: &str) -> Result<(), AppError> {
+    std::fs::create_dir_all(export_dir)?;
+    let output_path = build_daily_report_export_path(export_dir, date);
+    std::fs::write(output_path, content)?;
+    Ok(())
 }
 
 fn build_versioned_updater_endpoint(endpoint: &str, version: &str) -> Option<String> {
@@ -2373,6 +2413,7 @@ pub async fn generate_report(
         &config.text_model.endpoint,
         &config.text_model.model,
         config.text_model.api_key.as_deref(),
+        &config.daily_report_custom_prompt,
     );
 
     // 生成报告
@@ -2412,7 +2453,13 @@ pub async fn generate_report(
         crate::avatar_engine::emit_avatar_bubble(&app, &bubble);
     }
 
-    let report = report_result?;
+    let generated_report = report_result?;
+    let report = generated_report.content.clone();
+    let (saved_ai_mode, saved_model_name) = resolve_saved_report_metadata(
+        &config.ai_mode,
+        &config.text_model.model,
+        generated_report.used_ai,
+    );
 
     // 保存报告
     {
@@ -2420,11 +2467,15 @@ pub async fn generate_report(
         let daily_report = DailyReport {
             date: date.clone(),
             content: report.clone(),
-            ai_mode: format!("{:?}", config.ai_mode),
-            model_name: Some(config.text_model.model.clone()),
+            ai_mode: saved_ai_mode,
+            model_name: saved_model_name,
             created_at: chrono::Utc::now().timestamp(),
         };
         state.database.save_report(&daily_report)?;
+    }
+
+    if let Some(export_dir) = config.daily_report_export_dir.as_deref() {
+        export_daily_report_markdown(Path::new(export_dir), &date, &report)?;
     }
 
     Ok(report)
@@ -2440,6 +2491,38 @@ pub async fn get_saved_report(
     state.database.get_report(&date)
 }
 
+#[tauri::command]
+pub async fn export_report_markdown(
+    date: String,
+    content: Option<String>,
+    state: State<'_, Arc<Mutex<AppState>>>,
+) -> Result<String, AppError> {
+    let (export_dir, saved_content) = {
+        let state = state.lock().map_err(|e| AppError::Unknown(e.to_string()))?;
+        let export_dir = state
+            .config
+            .daily_report_export_dir
+            .clone()
+            .ok_or_else(|| AppError::Config("请先在设置中配置日报 Markdown 导出目录".to_string()))?;
+        let saved_content = if let Some(content) = content {
+            content
+        } else {
+            state
+                .database
+                .get_report(&date)?
+                .ok_or_else(|| AppError::Config("未找到可导出的日报".to_string()))?
+                .content
+        };
+        (export_dir, saved_content)
+    };
+
+    let export_dir_path = Path::new(&export_dir);
+    export_daily_report_markdown(export_dir_path, &date, &saved_content)?;
+    Ok(build_daily_report_export_path(export_dir_path, &date)
+        .to_string_lossy()
+        .to_string())
+}
+
 /// 获取配置
 #[tauri::command]
 pub async fn get_config(state: State<'_, Arc<Mutex<AppState>>>) -> Result<AppConfig, AppError> {
@@ -2453,12 +2536,14 @@ pub(crate) fn persist_app_config(
     state: &Arc<Mutex<AppState>>,
 ) -> Result<(), AppError> {
     config.normalize();
-    let avatar_state = {
+    let (previous_avatar_enabled, previous_avatar_scale, previous_avatar_opacity, previous_avatar_x, previous_avatar_y, previous_hide_dock_icon, previous_lightweight_mode, avatar_state) = {
         let mut state = state.lock().map_err(|e| AppError::Unknown(e.to_string()))?;
+        let previous_config = state.config.clone();
 
         // 更新配置
         state.config = config.clone();
         state.storage_manager.update_config(config.storage.clone());
+        state.screenshot_service.update_config(&config.storage);
 
         // 保存到文件
         let config_path = state.config_path.clone();
@@ -2470,20 +2555,46 @@ pub(crate) fn persist_app_config(
             state.avatar_state.clone(),
             config.avatar_opacity,
         );
-        state.avatar_state.clone()
+        (
+            previous_config.avatar_enabled,
+            previous_config.avatar_scale,
+            previous_config.avatar_opacity,
+            previous_config.avatar_x,
+            previous_config.avatar_y,
+            previous_config.hide_dock_icon,
+            previous_config.lightweight_mode,
+            state.avatar_state.clone(),
+        )
     };
 
-    crate::avatar_engine::sync_avatar_window(
-        &app,
-        config.avatar_enabled,
-        config.avatar_scale,
-        config.avatar_x.zip(config.avatar_y),
-    )
-    .map_err(|e| AppError::Unknown(format!("同步桌宠窗口失败: {e}")))?;
-    if config.avatar_enabled && !refresh_avatar_state_for_current_window(&app, state) {
+    let avatar_window_changed = previous_avatar_enabled != config.avatar_enabled
+        || previous_avatar_scale != config.avatar_scale
+        || previous_avatar_x != config.avatar_x
+        || previous_avatar_y != config.avatar_y;
+    let avatar_visual_changed = previous_avatar_opacity != config.avatar_opacity;
+    let dock_visibility_changed = previous_hide_dock_icon != config.hide_dock_icon
+        || previous_lightweight_mode != config.lightweight_mode;
+
+    if avatar_window_changed {
+        crate::avatar_engine::sync_avatar_window(
+            &app,
+            config.avatar_enabled,
+            config.avatar_scale,
+            config.avatar_x.zip(config.avatar_y),
+        )
+        .map_err(|e| AppError::Unknown(format!("同步桌宠窗口失败: {e}")))?;
+    }
+
+    if config.avatar_enabled
+        && (avatar_window_changed || avatar_visual_changed)
+        && !refresh_avatar_state_for_current_window(&app, state)
+    {
         crate::avatar_engine::emit_avatar_state(&app, &avatar_state);
     }
-    crate::sync_effective_dock_visibility(&app);
+
+    if dock_visibility_changed {
+        crate::sync_effective_dock_visibility(&app);
+    }
     crate::emit_config_changed(&app, &config);
 
     log::info!("配置已保存");
@@ -3102,6 +3213,10 @@ fn is_managed_dir_entry(name: &str) -> bool {
     MANAGED_DATA_ENTRIES.contains(&name)
 }
 
+fn is_cleanup_managed_dir_entry(name: &str) -> bool {
+    MANAGED_DATA_ENTRIES.contains(&name) || LIVE_DATABASE_FILES.contains(&name)
+}
+
 fn to_absolute_path(path: &Path) -> Result<PathBuf, AppError> {
     if path.is_absolute() {
         Ok(path.to_path_buf())
@@ -3155,10 +3270,79 @@ fn ensure_target_dir_ready(target_dir: &Path) -> Result<bool, AppError> {
     Ok(true)
 }
 
+fn copy_managed_data_without_live_db(source_dir: &Path, target_dir: &Path) -> Result<u64, AppError> {
+    let mut copied_files = 0u64;
+
+    for entry_name in MANAGED_DATA_ENTRIES {
+        if LIVE_DATABASE_FILES.contains(entry_name) {
+            continue;
+        }
+
+        let source_path = source_dir.join(entry_name);
+        if !source_path.exists() {
+            continue;
+        }
+
+        let target_path = target_dir.join(entry_name);
+        if source_path.is_dir() {
+            copied_files += crate::copy_dir_contents(&source_path, &target_path, true)?;
+        } else {
+            if let Some(parent) = target_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::copy(&source_path, &target_path)?;
+            copied_files += 1;
+        }
+    }
+
+    Ok(copied_files)
+}
+
+fn remove_app_managed_entries(target_dir: &Path) -> Result<(u64, Vec<String>), AppError> {
+    let mut removed_entries = 0u64;
+    let mut preserved_entries = Vec::new();
+
+    if !target_dir.exists() {
+        return Ok((0, preserved_entries));
+    }
+
+    for entry in std::fs::read_dir(target_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+
+        if is_ignorable_dir_entry(&name) {
+            continue;
+        }
+
+        if is_cleanup_managed_dir_entry(&name) {
+            if path.is_dir() {
+                std::fs::remove_dir_all(&path)?;
+            } else {
+                std::fs::remove_file(&path)?;
+            }
+            removed_entries += 1;
+            continue;
+        }
+
+        preserved_entries.push(name);
+    }
+
+    if preserved_entries.is_empty() {
+        let mut remaining_entries = std::fs::read_dir(target_dir)?;
+        if remaining_entries.next().is_none() {
+            let _ = std::fs::remove_dir(target_dir);
+        }
+    }
+
+    Ok((removed_entries, preserved_entries))
+}
+
 /// 切换数据目录，并迁移当前数据
 #[tauri::command]
 pub async fn change_data_dir(
     target_dir: String,
+    app: AppHandle,
     state: State<'_, Arc<Mutex<AppState>>>,
 ) -> Result<serde_json::Value, AppError> {
     let requested_dir = target_dir.trim();
@@ -3196,32 +3380,31 @@ pub async fn change_data_dir(
             .unwrap_or_else(|_| requested_path.clone())
     };
 
-    let replaced_existing_data = ensure_target_dir_ready(&target_dir)?;
-    let copied_files = crate::copy_dir_contents(&current_dir, &target_dir, true)?;
-
     let mut state = state.lock().map_err(|e| AppError::Unknown(e.to_string()))?;
+    let replaced_existing_data = ensure_target_dir_ready(&target_dir)?;
     let config = state.config.clone();
+
+    let copied_files = copy_managed_data_without_live_db(&current_dir, &target_dir)?;
+    state.database.backup_to(&target_dir.join("workreview.db"))?;
+
     let config_path = target_dir.join("config.json");
     config.save(&config_path)?;
-
-    let database = Database::new(&target_dir.join("workreview.db"))?;
-    let privacy_filter = PrivacyFilter::from_config(&config.privacy);
-    let screenshot_service = ScreenshotService::new(&target_dir);
-    let storage_manager = StorageManager::new(&target_dir, config.storage.clone());
-
     crate::save_data_dir_preference(&target_dir)?;
 
-    state.database = database;
-    state.privacy_filter = privacy_filter;
-    state.screenshot_service = screenshot_service;
-    state.storage_manager = storage_manager;
+    state.database = Database::new(&target_dir.join("workreview.db"))?;
+    state.privacy_filter = PrivacyFilter::from_config(&config.privacy);
+    state.screenshot_service = ScreenshotService::new(&target_dir, &config.storage);
+    state.storage_manager = StorageManager::new(&target_dir, config.storage.clone());
     state.data_dir = target_dir.clone();
     state.config_path = config_path;
 
     log::info!("数据目录已切换到: {:?}", target_dir);
+    drop(state);
+    crate::emit_recording_state_changed(&app);
 
     Ok(serde_json::json!({
         "dataDir": target_dir.to_string_lossy().to_string(),
+        "oldDataDir": current_dir.to_string_lossy().to_string(),
         "copiedFiles": copied_files,
         "replacedExistingData": replaced_existing_data,
         "message": format!(
@@ -3232,13 +3415,78 @@ pub async fn change_data_dir(
     }))
 }
 
+#[tauri::command]
+pub async fn cleanup_old_data_dir(
+    target_dir: String,
+    state: State<'_, Arc<Mutex<AppState>>>,
+) -> Result<serde_json::Value, AppError> {
+    let requested_dir = target_dir.trim();
+    if requested_dir.is_empty() {
+        return Err(AppError::Config("旧目录不能为空".to_string()));
+    }
+
+    let requested_path = to_absolute_path(Path::new(requested_dir))?;
+    if !requested_path.exists() {
+        return Ok(serde_json::json!({
+            "removedEntries": 0,
+            "preservedEntries": [],
+            "message": "旧目录不存在，无需清理",
+        }));
+    }
+
+    let current_dir = {
+        let state = state.lock().map_err(|e| AppError::Unknown(e.to_string()))?;
+        state
+            .data_dir
+            .canonicalize()
+            .unwrap_or_else(|_| state.data_dir.clone())
+    };
+
+    let cleanup_dir = requested_path
+        .canonicalize()
+        .unwrap_or_else(|_| requested_path.clone());
+
+    if cleanup_dir == current_dir {
+        return Err(AppError::Config(
+            "不能清理当前正在使用的数据目录".to_string(),
+        ));
+    }
+
+    if cleanup_dir.starts_with(&current_dir) || current_dir.starts_with(&cleanup_dir) {
+        return Err(AppError::Config(
+            "为避免误删，当前数据目录与待清理目录不能互为父子目录".to_string(),
+        ));
+    }
+
+    let (removed_entries, preserved_entries) = remove_app_managed_entries(&cleanup_dir)?;
+    let message = if preserved_entries.is_empty() {
+        if cleanup_dir.exists() {
+            format!("已清理旧目录中的 {} 项 Work Review 数据", removed_entries)
+        } else {
+            format!("已清理旧目录中的 {} 项 Work Review 数据，并移除空目录", removed_entries)
+        }
+    } else {
+        format!(
+            "已清理旧目录中的 {} 项 Work Review 数据，保留其他文件：{}",
+            removed_entries,
+            preserved_entries.join("、")
+        )
+    };
+
+    Ok(serde_json::json!({
+        "removedEntries": removed_entries,
+        "preservedEntries": preserved_entries,
+        "message": message,
+    }))
+}
+
 /// 基于 updater.json 优先检查更新；若自动更新元数据暂未就绪，则回退到 GitHub Release API。
 #[tauri::command]
 pub async fn check_github_update() -> Result<GithubUpdateInfo, AppError> {
     let client = reqwest::Client::builder()
         .user_agent("WorkReview-Updater")
-        .timeout(Duration::from_secs(20))
-        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(UPDATE_REQUEST_TIMEOUT_SECS))
+        .connect_timeout(Duration::from_secs(UPDATE_CONNECT_TIMEOUT_SECS))
         .build()
         .map_err(|e| AppError::Unknown(format!("创建更新检查客户端失败: {e}")))?;
 
@@ -3322,10 +3570,10 @@ pub async fn download_and_install_github_update(
                 .updater_builder()
                 .endpoints(vec![endpoint_url])
                 .map_err(|e| AppError::Unknown(format!("配置更新源失败 ({source_label}): {e}")))?
-                .timeout(Duration::from_secs(20))
+                .timeout(Duration::from_secs(UPDATE_REQUEST_TIMEOUT_SECS))
                 .configure_client(|client| {
                     client
-                        .connect_timeout(Duration::from_secs(10))
+                        .connect_timeout(Duration::from_secs(UPDATE_CONNECT_TIMEOUT_SECS))
                         .user_agent("WorkReview-Updater")
                 })
                 .build()
@@ -5143,13 +5391,18 @@ async fn get_app_icon_impl(
 mod tests {
     use super::{
         build_fallback_assistant_answer, build_updater_manifest_candidates,
+        build_daily_report_export_path, export_daily_report_markdown,
         build_windows_icon_cache_key, detect_assistant_question_kind,
         detect_assistant_question_kind_with_mode, format_browser_url_for_display,
         macos_score_app_bundle_name, merge_windows_icon_lookup_candidates,
-        normalize_macos_app_lookup_name, AssistantChatMessage, AssistantQuestionKind,
-        AssistantReasoningMode,
+        normalize_macos_app_lookup_name, normalize_saved_report_ai_mode,
+        resolve_saved_report_metadata, AssistantChatMessage, AssistantQuestionKind,
+        AssistantReasoningMode, UPDATE_CONNECT_TIMEOUT_SECS, UPDATE_REQUEST_TIMEOUT_SECS,
+        UPDATER_JSON_ENDPOINTS,
     };
+    use crate::config::AiMode;
     use crate::database::MemorySearchItem;
+    use std::path::{Path, PathBuf};
     use crate::work_intelligence::{
         IntentAnalysisResult, IntentSummary, NamedDuration, WeeklyReviewResult, WorkSession,
     };
@@ -5382,6 +5635,57 @@ mod tests {
     }
 
     #[test]
+    fn summary回退到基础模板时不应保留_ai_模型标签() {
+        let (ai_mode, model_name) =
+            resolve_saved_report_metadata(&AiMode::Summary, "gpt-5.4", false);
+
+        assert_eq!(ai_mode, "local");
+        assert_eq!(model_name, None);
+    }
+
+    #[test]
+    fn ai成功生成时应保留实际配置的模式与模型() {
+        let (ai_mode, model_name) =
+            resolve_saved_report_metadata(&AiMode::Summary, "gpt-5.4", true);
+
+        assert_eq!(ai_mode, "summary");
+        assert_eq!(model_name, Some("gpt-5.4".to_string()));
+    }
+
+    #[test]
+    fn 保存的日报模式应统一转为小写() {
+        assert_eq!(normalize_saved_report_ai_mode("Summary"), "summary");
+        assert_eq!(normalize_saved_report_ai_mode(" local "), "local");
+    }
+
+    #[test]
+    fn 日报导出路径应按日期生成_markdown_文件名() {
+        let export_path = build_daily_report_export_path(
+            Path::new("/tmp/reports"),
+            "2026-03-29",
+        );
+
+        assert_eq!(
+            export_path,
+            PathBuf::from("/tmp/reports").join("2026-03-29.md")
+        );
+    }
+
+    #[test]
+    fn 日报导出应写入_markdown_文件() {
+        let temp_dir = std::env::temp_dir().join(format!("work-review-export-{}", uuid::Uuid::new_v4()));
+        export_daily_report_markdown(&temp_dir, "2026-03-29", "# 工作日报\n\n测试内容")
+            .expect("应能导出 Markdown");
+
+        let output_path = temp_dir.join("2026-03-29.md");
+        let content = std::fs::read_to_string(&output_path).expect("应能读取导出内容");
+        assert_eq!(content, "# 工作日报\n\n测试内容");
+
+        let _ = std::fs::remove_file(&output_path);
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
     fn 助手问题分类应识别阶段总结与过程复盘和证据追问() {
         assert_eq!(
             detect_assistant_question_kind("这周主要做了什么？", &[]),
@@ -5413,6 +5717,16 @@ mod tests {
                     .to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn 更新源应优先官方_github_并放宽超时() {
+        assert_eq!(
+            UPDATER_JSON_ENDPOINTS.first().copied(),
+            Some("https://github.com/wm94i/Work_Review/releases/latest/download/updater.json")
+        );
+        assert!(UPDATE_REQUEST_TIMEOUT_SECS >= 30);
+        assert!(UPDATE_CONNECT_TIMEOUT_SECS >= 10);
     }
 
     #[test]

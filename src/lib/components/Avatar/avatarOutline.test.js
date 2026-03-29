@@ -59,19 +59,31 @@ test('桌宠路径不应复用全局 outline 类名，避免 SVG 包围框泄漏
   assert.match(windowSource, /getAvatarStateBubble/);
   assert.match(windowSource, /showBubble\(stateBubble\)/);
   assert.match(engineSource, /const AVATAR_SCALE_DEFAULT: f64 = 0\.9;/);
-  assert.match(engineSource, /const AVATAR_WINDOW_BASE_WIDTH: f64 = 152\.0;/);
+  assert.match(engineSource, /const AVATAR_WINDOW_BASE_WIDTH: f64 = 276\.0;/);
   assert.match(engineSource, /const AVATAR_WINDOW_BASE_HEIGHT: f64 = 170\.0;/);
   assert.match(engineSource, /const AVATAR_WINDOW_MARGIN: f64 = 8\.0;/);
 });
 
 test('状态气泡应悬浮在猫头上方，采用紧凑气泡而不是横条', () => {
   const source = readFileSync(new URL('./AvatarPopover.svelte', import.meta.url), 'utf8');
+  const windowSource = readFileSync(new URL('../../../routes/avatar/AvatarWindow.svelte', import.meta.url), 'utf8');
 
-  assert.match(source, /Array\.from\(bubble\.message\.replace\(\/\\s\+\/g, ''\)\)/);
-  assert.match(source, /style="right: 4%; top: 2%;"/);
-  assert.match(source, /min-width: clamp\(22px, 14vw, 30px\)/);
-  assert.match(source, /font-size: clamp\(10px, 7vw, 13px\)/);
-  assert.match(source, /flex flex-col items-center/);
-  assert.match(source, /rotate-45 border-b border-r/);
+  assert.doesNotMatch(source, /Array\.from\(bubble\.message\.replace\(\/\\s\+\/g, ''\)\)/);
+  assert.match(source, /style="right: 18%; top: 4%;"/);
+  assert.doesNotMatch(source, /writing-mode: vertical-rl/);
+  assert.match(source, /width: fit-content/);
+  assert.match(source, /max-width: min\(58vw, 188px\)/);
+  assert.match(source, /min-width: 0/);
+  assert.match(source, /display: inline-block;/);
+  assert.match(source, /bg-\[linear-gradient\(180deg,\s*rgba\(15,23,42,0\.97\),\s*rgba\(30,41,59,0\.93\)\)\] text-slate-100/);
+  assert.match(source, /bg-\[linear-gradient\(180deg,\s*rgba\(6,78,59,0\.97\),\s*rgba\(6,95,70,0\.94\)\)\] text-emerald-50/);
+  assert.match(source, /shadow-\[0_10px_18px_rgba\(15,23,42,0\.18\),0_24px_44px_rgba\(15,23,42,0\.26\)\]/);
+  assert.match(source, /absolute inset-\[1px\] rounded-\[21px\] border border-white\/10/);
+  assert.match(source, /text-sm font-semibold leading-\[1\.35\] tracking-\[0\.01em\]/);
+  assert.match(source, /rounded-\[22px\]/);
+  assert.match(source, /left-\[18px\] top-\[calc\(100%-4px\)\]/);
+  assert.match(source, /h-\[7px\] w-\[7px\] rounded-full/);
+  assert.match(source, /h-\[11px\] w-\[11px\] rounded-full/);
+  assert.match(windowSource, /class="h-full w-\[54%\]"/);
   assert.doesNotMatch(source, /-translate-x-1\/2/);
 });
