@@ -190,12 +190,20 @@ fn resolve_saved_report_metadata(
     }
 }
 
+fn normalize_saved_report_ai_mode(value: &str) -> String {
+    value.trim().to_lowercase()
+}
+
 fn build_daily_report_export_path(export_dir: &Path, date: &str) -> PathBuf {
     let safe_date = date.replace('/', "-").replace('\\', "-");
     export_dir.join(format!("{safe_date}.md"))
 }
 
-fn export_daily_report_markdown(export_dir: &Path, date: &str, content: &str) -> Result<(), AppError> {
+fn export_daily_report_markdown(
+    export_dir: &Path,
+    date: &str,
+    content: &str,
+) -> Result<(), AppError> {
     std::fs::create_dir_all(export_dir)?;
     let output_path = build_daily_report_export_path(export_dir, date);
     std::fs::write(output_path, content)?;
@@ -2512,9 +2520,13 @@ pub async fn export_report_markdown(
             .map(str::trim)
             .filter(|dir| !dir.is_empty())
             .map(|dir| dir.to_string());
-        let export_dir = requested_export_dir.or(configured_export_dir).ok_or_else(|| {
-            AppError::Config("请先选择导出目录，或在设置中配置日报 Markdown 导出目录".to_string())
-        })?;
+        let export_dir = requested_export_dir
+            .or(configured_export_dir)
+            .ok_or_else(|| {
+                AppError::Config(
+                    "请先选择导出目录，或在设置中配置日报 Markdown 导出目录".to_string(),
+                )
+            })?;
         let saved_content = if let Some(content) = content {
             content
         } else {
@@ -2547,7 +2559,16 @@ pub(crate) fn persist_app_config(
     state: &Arc<Mutex<AppState>>,
 ) -> Result<(), AppError> {
     config.normalize();
-    let (previous_avatar_enabled, previous_avatar_scale, previous_avatar_opacity, previous_avatar_x, previous_avatar_y, previous_hide_dock_icon, previous_lightweight_mode, avatar_state) = {
+    let (
+        previous_avatar_enabled,
+        previous_avatar_scale,
+        previous_avatar_opacity,
+        previous_avatar_x,
+        previous_avatar_y,
+        previous_hide_dock_icon,
+        previous_lightweight_mode,
+        avatar_state,
+    ) = {
         let mut state = state.lock().map_err(|e| AppError::Unknown(e.to_string()))?;
         let previous_config = state.config.clone();
 
@@ -3281,7 +3302,10 @@ fn ensure_target_dir_ready(target_dir: &Path) -> Result<bool, AppError> {
     Ok(true)
 }
 
-fn copy_managed_data_without_live_db(source_dir: &Path, target_dir: &Path) -> Result<u64, AppError> {
+fn copy_managed_data_without_live_db(
+    source_dir: &Path,
+    target_dir: &Path,
+) -> Result<u64, AppError> {
     let mut copied_files = 0u64;
 
     for entry_name in MANAGED_DATA_ENTRIES {
@@ -3396,7 +3420,9 @@ pub async fn change_data_dir(
     let config = state.config.clone();
 
     let copied_files = copy_managed_data_without_live_db(&current_dir, &target_dir)?;
-    state.database.backup_to(&target_dir.join("workreview.db"))?;
+    state
+        .database
+        .backup_to(&target_dir.join("workreview.db"))?;
 
     let config_path = target_dir.join("config.json");
     config.save(&config_path)?;
@@ -3474,7 +3500,10 @@ pub async fn cleanup_old_data_dir(
         if cleanup_dir.exists() {
             format!("已清理旧目录中的 {} 项 Work Review 数据", removed_entries)
         } else {
-            format!("已清理旧目录中的 {} 项 Work Review 数据，并移除空目录", removed_entries)
+            format!(
+                "已清理旧目录中的 {} 项 Work Review 数据，并移除空目录",
+                removed_entries
+            )
         }
     } else {
         format!(
@@ -5401,22 +5430,21 @@ async fn get_app_icon_impl(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_fallback_assistant_answer, build_updater_manifest_candidates,
-        build_daily_report_export_path, export_daily_report_markdown,
-        build_windows_icon_cache_key, detect_assistant_question_kind,
-        detect_assistant_question_kind_with_mode, format_browser_url_for_display,
-        macos_score_app_bundle_name, merge_windows_icon_lookup_candidates,
-        normalize_macos_app_lookup_name, normalize_saved_report_ai_mode,
-        resolve_saved_report_metadata, AssistantChatMessage, AssistantQuestionKind,
-        AssistantReasoningMode, UPDATE_CONNECT_TIMEOUT_SECS, UPDATE_REQUEST_TIMEOUT_SECS,
-        UPDATER_JSON_ENDPOINTS,
+        build_daily_report_export_path, build_fallback_assistant_answer,
+        build_updater_manifest_candidates, build_windows_icon_cache_key,
+        detect_assistant_question_kind, detect_assistant_question_kind_with_mode,
+        export_daily_report_markdown, format_browser_url_for_display, macos_score_app_bundle_name,
+        merge_windows_icon_lookup_candidates, normalize_macos_app_lookup_name,
+        normalize_saved_report_ai_mode, resolve_saved_report_metadata, AssistantChatMessage,
+        AssistantQuestionKind, AssistantReasoningMode, UPDATER_JSON_ENDPOINTS,
+        UPDATE_CONNECT_TIMEOUT_SECS, UPDATE_REQUEST_TIMEOUT_SECS,
     };
     use crate::config::AiMode;
     use crate::database::MemorySearchItem;
-    use std::path::{Path, PathBuf};
     use crate::work_intelligence::{
         IntentAnalysisResult, IntentSummary, NamedDuration, WeeklyReviewResult, WorkSession,
     };
+    use std::path::{Path, PathBuf};
 
     fn sample_review() -> WeeklyReviewResult {
         WeeklyReviewResult {
@@ -5671,10 +5699,7 @@ mod tests {
 
     #[test]
     fn 日报导出路径应按日期生成_markdown_文件名() {
-        let export_path = build_daily_report_export_path(
-            Path::new("/tmp/reports"),
-            "2026-03-29",
-        );
+        let export_path = build_daily_report_export_path(Path::new("/tmp/reports"), "2026-03-29");
 
         assert_eq!(
             export_path,
@@ -5684,7 +5709,8 @@ mod tests {
 
     #[test]
     fn 日报导出应写入_markdown_文件() {
-        let temp_dir = std::env::temp_dir().join(format!("work-review-export-{}", uuid::Uuid::new_v4()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("work-review-export-{}", uuid::Uuid::new_v4()));
         export_daily_report_markdown(&temp_dir, "2026-03-29", "# 工作日报\n\n测试内容")
             .expect("应能导出 Markdown");
 

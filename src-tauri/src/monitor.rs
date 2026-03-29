@@ -7,8 +7,6 @@ use serde_json::Value;
 use std::collections::HashMap;
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
-#[cfg(target_os = "windows")]
-use winapi::shared::windef::RECT;
 use std::path::{Path, PathBuf};
 #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 use std::process::{Command, Output, Stdio};
@@ -17,6 +15,8 @@ use std::sync::Mutex;
 use std::thread;
 #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 use std::time::{Duration, Instant};
+#[cfg(target_os = "windows")]
+use winapi::shared::windef::RECT;
 
 #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 const MONITOR_COMMAND_TIMEOUT: Duration = Duration::from_millis(1200);
@@ -1281,12 +1281,16 @@ fn extract_url_from_title(window_title: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "macos")]
     use super::{
         best_browser_url_candidate_from_output, browser_url_system_events_process_name_macos,
-        browser_url_ui_script_macos, categorize_app, categorize_app_with_rules,
-        decode_mozlz4_bytes, extract_active_tab_url_from_session_store_value,
-        extract_url_from_title, firefox_family_profile_dir_from_ini, is_browser_app,
-        is_probable_domain, normalize_possible_url, remember_browser_url_log,
+        browser_url_ui_script_macos,
+    };
+    use super::{
+        categorize_app, categorize_app_with_rules, decode_mozlz4_bytes,
+        extract_active_tab_url_from_session_store_value, extract_url_from_title,
+        firefox_family_profile_dir_from_ini, is_browser_app, is_probable_domain,
+        normalize_possible_url, remember_browser_url_log,
     };
     use std::collections::HashMap;
     use std::path::Path;
@@ -2259,6 +2263,16 @@ fn get_browser_url(app_name: &str, window_title: &str) -> Option<String> {
     }
 }
 
+#[cfg(target_os = "macos")]
+pub fn resolve_browser_url_for_window(app_name: &str, window_title: &str) -> Option<String> {
+    get_browser_url(app_name, window_title)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn resolve_browser_url_for_window(_app_name: &str, _window_title: &str) -> Option<String> {
+    None
+}
+
 /// 获取当前活动窗口信息 (Linux X11，使用 xdotool + xprop)
 #[cfg(target_os = "linux")]
 pub fn get_active_window() -> Result<ActiveWindow> {
@@ -2268,7 +2282,9 @@ pub fn get_active_window() -> Result<ActiveWindow> {
         "xdotool getactivewindow",
     )?;
 
-    let wid_str = String::from_utf8_lossy(&wid_output.stdout).trim().to_string();
+    let wid_str = String::from_utf8_lossy(&wid_output.stdout)
+        .trim()
+        .to_string();
     if wid_str.is_empty() {
         return Err(AppError::Unknown("没有活动窗口".to_string()));
     }
@@ -2278,14 +2294,18 @@ pub fn get_active_window() -> Result<ActiveWindow> {
         Command::new("xdotool").args(["getwindowname", &wid_str]),
         "xdotool getwindowname",
     )?;
-    let window_title = String::from_utf8_lossy(&title_output.stdout).trim().to_string();
+    let window_title = String::from_utf8_lossy(&title_output.stdout)
+        .trim()
+        .to_string();
 
     // 获取窗口 PID
     let pid_output = run_monitor_command_with_timeout(
         Command::new("xdotool").args(["getwindowpid", &wid_str]),
         "xdotool getwindowpid",
     )?;
-    let pid_str = String::from_utf8_lossy(&pid_output.stdout).trim().to_string();
+    let pid_str = String::from_utf8_lossy(&pid_output.stdout)
+        .trim()
+        .to_string();
 
     // 通过 PID 获取进程名和可执行路径
     let (app_name, executable_path) = if let Ok(pid) = pid_str.parse::<u32>() {
@@ -2313,8 +2333,7 @@ pub fn get_active_window() -> Result<ActiveWindow> {
     } else {
         // PID 解析失败，尝试从 xprop 获取 WM_CLASS
         let class_output = run_monitor_command_with_timeout(
-            Command::new("xprop")
-                .args(["-id", &wid_str, "WM_CLASS"]),
+            Command::new("xprop").args(["-id", &wid_str, "WM_CLASS"]),
             "xprop WM_CLASS",
         );
         let app_name = if let Ok(output) = class_output {
@@ -2330,8 +2349,7 @@ pub fn get_active_window() -> Result<ActiveWindow> {
 
     // 尝试获取浏览器 URL（从窗口标题推断）
     let browser_url = if is_browser_app(&app_name) {
-        extract_url_from_title(&window_title)
-            .or_else(|| get_browser_url_from_xprop(&wid_str))
+        extract_url_from_title(&window_title).or_else(|| get_browser_url_from_xprop(&wid_str))
     } else {
         None
     };

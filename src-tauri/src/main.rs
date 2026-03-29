@@ -569,12 +569,46 @@ fn recording_loop_decision(
     }
 }
 
+fn monitoring_poll_interval_ms_for_platform(is_macos: bool) -> u64 {
+    if is_macos {
+        1500
+    } else {
+        500
+    }
+}
+
 fn monitoring_poll_interval_ms() -> u64 {
-    500
+    monitoring_poll_interval_ms_for_platform(cfg!(target_os = "macos"))
+}
+
+fn avatar_monitor_poll_interval_ms_for_platform(is_macos: bool, active: bool) -> u64 {
+    if is_macos {
+        if active {
+            750
+        } else {
+            2000
+        }
+    } else if active {
+        180
+    } else {
+        750
+    }
 }
 
 fn avatar_monitor_poll_interval_ms() -> u64 {
-    180
+    avatar_monitor_poll_interval_ms_for_platform(cfg!(target_os = "macos"), true)
+}
+
+fn screen_lock_check_interval_ms_for_platform(is_macos: bool) -> u64 {
+    if is_macos {
+        5000
+    } else {
+        1000
+    }
+}
+
+fn screen_lock_check_interval_ms() -> u64 {
+    screen_lock_check_interval_ms_for_platform(cfg!(target_os = "macos"))
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -705,8 +739,6 @@ async fn background_avatar_task(state: Arc<Mutex<AppState>>, app: AppHandle) {
     let idle_detector = idle_detector::IdleDetector::new(IDLE_TIMEOUT_MINUTES);
 
     loop {
-        tokio::time::sleep(Duration::from_millis(avatar_monitor_poll_interval_ms())).await;
-
         let (avatar_enabled, avatar_generating_report, avatar_opacity, is_recording, is_paused) = {
             let state_guard = state.lock().unwrap_or_else(|e| e.into_inner());
             (
@@ -720,6 +752,14 @@ async fn background_avatar_task(state: Arc<Mutex<AppState>>, app: AppHandle) {
 
         let activity_decision =
             avatar_activity_decision(avatar_enabled, is_recording, is_paused, avatar_opacity);
+        tokio::time::sleep(Duration::from_millis(
+            avatar_monitor_poll_interval_ms_for_platform(
+                cfg!(target_os = "macos"),
+                activity_decision.should_continue,
+            ),
+        ))
+        .await;
+
         if !activity_decision.should_continue {
             pending_avatar_state = None;
             pending_avatar_hits = 0;
@@ -857,17 +897,12 @@ async fn background_screenshot_task(state: Arc<Mutex<AppState>>, app: AppHandle)
 
     // 锁屏检测器（无内部状态，复用同一实例避免重复分配）
     let screen_lock_monitor = screen_lock::ScreenLockMonitor::new();
+    let mut last_screen_lock_check = std::time::Instant::now()
+        .checked_sub(Duration::from_millis(screen_lock_check_interval_ms()))
+        .unwrap_or_else(std::time::Instant::now);
+    let mut cached_screen_locked = false;
 
     loop {
-        // 检测屏幕锁定状态，锁屏时不统计时长
-        if screen_lock_monitor.is_locked() {
-            log::info!("🔒 屏幕已锁定，暂停活动统计");
-            last_app_name = None; // 重置应用状态，解锁后视为新开始
-            last_capture_time = std::time::Instant::now(); // 重置截图计时，避免解锁后累加锁屏时长
-            tokio::time::sleep(Duration::from_secs(5)).await;
-            continue;
-        }
-
         // 首先检查录制状态并获取配置
         let decision = {
             let state_guard = state.lock().unwrap_or_else(|e| e.into_inner());
@@ -887,6 +922,22 @@ async fn background_screenshot_task(state: Arc<Mutex<AppState>>, app: AppHandle)
             continue;
         }
 
+        if last_screen_lock_check.elapsed()
+            >= Duration::from_millis(screen_lock_check_interval_ms())
+        {
+            cached_screen_locked = screen_lock_monitor.is_locked();
+            last_screen_lock_check = std::time::Instant::now();
+        }
+
+        // 检测屏幕锁定状态，锁屏时不统计时长
+        if cached_screen_locked {
+            log::info!("🔒 屏幕已锁定，暂停活动统计");
+            last_app_name = None; // 重置应用状态，解锁后视为新开始
+            last_capture_time = std::time::Instant::now(); // 重置截图计时，避免解锁后累加锁屏时长
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            continue;
+        }
+
         let screenshot_interval = decision.screenshot_interval;
 
         // 轮询检测活动窗口（1秒间隔），让桌宠状态切换更及时
@@ -895,7 +946,7 @@ async fn background_screenshot_task(state: Arc<Mutex<AppState>>, app: AppHandle)
         // 获取当前活动窗口
         // 失败原因：Windows 睡眠/待机/UAC 时无前台窗口、macOS 权限不足等
         // 此时重置计时器，避免累积的时长被错误归属到下一个真实应用
-        let mut active_window = match monitor::get_active_window() {
+        let mut active_window = match monitor::get_active_window_fast() {
             Ok(w) => w,
             Err(_) => {
                 last_capture_time = std::time::Instant::now();
@@ -974,7 +1025,7 @@ async fn background_screenshot_task(state: Arc<Mutex<AppState>>, app: AppHandle)
         let previous_window_title = last_app_window_title.clone();
         let previous_browser_url = last_browser_url.clone();
 
-        let url_changed = match (&last_browser_url, &active_window.browser_url) {
+        let mut url_changed = match (&last_browser_url, &active_window.browser_url) {
             (Some(l), Some(r)) => l != r,
             (None, None) => false,
             _ => true,
@@ -986,15 +1037,9 @@ async fn background_screenshot_task(state: Arc<Mutex<AppState>>, app: AppHandle)
             (None, _) => true,
         };
 
-        let app_changed = match &last_app_name {
+        let mut app_changed = match &last_app_name {
             Some(last) => last != &active_window.app_name || url_changed || title_changed,
             None => true,
-        };
-        // 保存切换前的应用名，用于时长归属修正
-        let previous_app_name = if app_changed {
-            last_app_name.clone()
-        } else {
-            None
         };
 
         // 计算距离上次截图的时间
@@ -1055,6 +1100,29 @@ async fn background_screenshot_task(state: Arc<Mutex<AppState>>, app: AppHandle)
             }
             continue;
         }
+
+        if monitor::is_browser_app(&active_window.app_name) && active_window.browser_url.is_none() {
+            active_window.browser_url = monitor::resolve_browser_url_for_window(
+                &active_window.app_name,
+                &active_window.window_title,
+            );
+            url_changed = match (&last_browser_url, &active_window.browser_url) {
+                (Some(l), Some(r)) => l != r,
+                (None, None) => false,
+                _ => true,
+            };
+            app_changed = match &last_app_name {
+                Some(last) => last != &active_window.app_name || url_changed || title_changed,
+                None => true,
+            };
+        }
+
+        // 保存切换前的应用名，用于时长归属修正
+        let previous_app_name = if app_changed {
+            last_app_name.clone()
+        } else {
+            None
+        };
 
         // 取决定截图后，才更新上一个应用的信息
         last_app_name = Some(active_window.app_name.clone());
@@ -1308,7 +1376,9 @@ async fn background_screenshot_task(state: Arc<Mutex<AppState>>, app: AppHandle)
                         if let Ok(ref screenshot) = screenshot_result {
                             let state_guard = state.lock().unwrap_or_else(|e| e.into_inner());
                             (
-                                state_guard.screenshot_service.get_relative_path(&screenshot.path),
+                                state_guard
+                                    .screenshot_service
+                                    .get_relative_path(&screenshot.path),
                                 Some(state_guard.data_dir.join(&previous_screenshot_path)),
                             )
                         } else {
@@ -1371,11 +1441,10 @@ async fn background_screenshot_task(state: Arc<Mutex<AppState>>, app: AppHandle)
                             tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
                             // 计算哈希做去重判断
-                            let current_hash =
-                                screenshot::ScreenshotService::calculate_image_hash(
-                                    &latest_capture_path,
-                                )
-                                    .unwrap_or(0);
+                            let current_hash = screenshot::ScreenshotService::calculate_image_hash(
+                                &latest_capture_path,
+                            )
+                            .unwrap_or(0);
                             let last_hash =
                                 MERGE_SCREENSHOT_HASH.swap(current_hash, Ordering::Relaxed);
 
@@ -2271,10 +2340,13 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        avatar_activity_decision, avatar_monitor_poll_interval_ms, avatar_transition_decision,
+        avatar_activity_decision, avatar_monitor_poll_interval_ms,
+        avatar_monitor_poll_interval_ms_for_platform, avatar_transition_decision,
         effective_dock_visibility, main_window_close_behavior, monitoring_poll_interval_ms,
-        recording_loop_decision, should_prevent_exit, tray_recording_toggle_action,
-        tray_recording_toggle_label, MainWindowCloseBehavior, RecordingToggleAction,
+        monitoring_poll_interval_ms_for_platform, recording_loop_decision,
+        screen_lock_check_interval_ms_for_platform, should_prevent_exit,
+        tray_recording_toggle_action, tray_recording_toggle_label, MainWindowCloseBehavior,
+        RecordingToggleAction,
     };
     use crate::avatar_engine::{apply_avatar_opacity, default_avatar_state, derive_avatar_state};
 
@@ -2310,6 +2382,32 @@ mod tests {
     #[test]
     fn 桌宠独立轮询间隔应压到一百八十毫秒() {
         assert_eq!(avatar_monitor_poll_interval_ms(), 180);
+    }
+
+    #[test]
+    fn mac主监控轮询间隔应降频() {
+        assert_eq!(monitoring_poll_interval_ms_for_platform(true), 1500);
+    }
+
+    #[test]
+    fn mac桌宠活跃轮询间隔应降频() {
+        assert_eq!(
+            avatar_monitor_poll_interval_ms_for_platform(true, true),
+            750
+        );
+    }
+
+    #[test]
+    fn mac桌宠空闲轮询间隔应进一步降频() {
+        assert_eq!(
+            avatar_monitor_poll_interval_ms_for_platform(true, false),
+            2000
+        );
+    }
+
+    #[test]
+    fn mac锁屏检测轮询间隔应显著降频() {
+        assert_eq!(screen_lock_check_interval_ms_for_platform(true), 5000);
     }
 
     #[test]

@@ -32,6 +32,11 @@
 
   // 窗口控制函数
   async function closeWindow() {
+    if (runtimeConfig?.lightweight_mode) {
+      await appWindow.close();
+      return;
+    }
+
     await appWindow.hide();
   }
 
