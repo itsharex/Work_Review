@@ -129,6 +129,8 @@ pub struct DailyStats {
 pub struct DomainUsage {
     pub domain: String,
     pub duration: i64,
+    #[serde(default)]
+    pub semantic_category: Option<String>,
     pub urls: Vec<UrlDetail>,
 }
 
@@ -950,7 +952,8 @@ impl Database {
                     category,
                     duration,
                     browser_url,
-                    executable_path
+                    executable_path,
+                    semantic_category
              FROM activities
              WHERE timestamp > ?1 AND timestamp - duration < ?2
              ORDER BY timestamp DESC",
@@ -965,6 +968,7 @@ impl Database {
             i64,
             Option<String>,
             Option<String>,
+            Option<String>,
         )> = stmt
             .query_map(params![start_ts, end_ts], |row| {
                 Ok((
@@ -976,6 +980,7 @@ impl Database {
                     row.get(5)?,
                     row.get(6)?,
                     row.get(7)?,
+                    row.get(8)?,
                 ))
             })?
             .filter_map(|r| r.ok())
@@ -998,6 +1003,10 @@ impl Database {
             std::collections::HashMap::new();
         let mut url_duration_map: std::collections::HashMap<String, i64> =
             std::collections::HashMap::new();
+        let mut domain_semantic_map: std::collections::HashMap<
+            String,
+            std::collections::HashMap<String, i64>,
+        > = std::collections::HashMap::new();
 
         for (
             timestamp,
@@ -1008,6 +1017,7 @@ impl Database {
             duration,
             browser_url,
             executable_path,
+            semantic_category,
         ) in activity_rows
         {
             let day_duration = calculate_overlap_duration(timestamp, duration, start_ts, end_ts);
@@ -1071,7 +1081,40 @@ impl Database {
                 let page_map = domain_map.entry(domain).or_default();
                 *page_map.entry(page_hint.clone()).or_insert(0) += day_duration;
                 *url_duration_map.entry(page_hint).or_insert(0) += day_duration;
+
+                if let Some(semantic_category) = semantic_category
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                {
+                    *domain_semantic_map
+                        .entry(crate::monitor::browser_page_domain_label(
+                            browser_url.as_deref().unwrap_or_default(),
+                        ))
+                        .or_default()
+                        .entry(semantic_category.to_string())
+                        .or_insert(0) += day_duration;
+                }
             }
+        }
+
+        fn pick_semantic_category(
+            semantic_map: &std::collections::HashMap<
+                String,
+                std::collections::HashMap<String, i64>,
+            >,
+            domain: &str,
+        ) -> Option<String> {
+            semantic_map.get(domain).and_then(|candidates| {
+                candidates
+                    .iter()
+                    .max_by(|(left_name, left_duration), (right_name, right_duration)| {
+                        left_duration
+                            .cmp(right_duration)
+                            .then_with(|| right_name.cmp(left_name))
+                    })
+                    .map(|(semantic_category, _)| semantic_category.clone())
+            })
         }
 
         // 在 Rust 侧按显示名再次聚合，避免 work-review / Work Review 等别名被拆成多条
@@ -1121,6 +1164,10 @@ impl Database {
                             DomainUsage {
                                 domain: domain.clone(),
                                 duration: domain_duration,
+                                semantic_category: pick_semantic_category(
+                                    &domain_semantic_map,
+                                    domain,
+                                ),
                                 urls: url_details,
                             }
                         })
@@ -1174,10 +1221,14 @@ impl Database {
 
         let mut domain_usage: Vec<DomainUsage> = domain_map_compat
             .into_iter()
-            .map(|(domain, (duration, urls))| DomainUsage {
-                domain,
-                duration,
-                urls,
+            .map(|(domain, (duration, urls))| {
+                let semantic_category = pick_semantic_category(&domain_semantic_map, &domain);
+                DomainUsage {
+                    domain,
+                    duration,
+                    semantic_category,
+                    urls,
+                }
             })
             .collect();
         domain_usage.sort_by(|a, b| b.duration.cmp(&a.duration));
@@ -1667,6 +1718,53 @@ impl Database {
             .filter(|activity| {
                 crate::monitor::normalize_display_app_name(&activity.app_name).to_lowercase()
                     == target
+            })
+            .collect();
+
+        Ok(activities)
+    }
+
+    pub fn get_activities_by_domain(&self, domain: &str) -> Result<Vec<Activity>> {
+        let conn = self.conn.lock().map_err(|e| {
+            AppError::Database(rusqlite::Error::InvalidParameterName(e.to_string()))
+        })?;
+
+        let Some(target) = crate::monitor::normalize_domain_rule(domain) else {
+            return Ok(Vec::new());
+        };
+
+        let mut stmt = conn.prepare(
+            "SELECT id, timestamp, app_name, window_title, screenshot_path, ocr_text, category, duration, browser_url, executable_path, semantic_category, semantic_confidence
+             FROM activities
+             WHERE browser_url IS NOT NULL AND browser_url != ''
+             ORDER BY timestamp ASC, id ASC",
+        )?;
+
+        let activities = stmt
+            .query_map([], |row| {
+                Ok(Activity {
+                    id: Some(row.get(0)?),
+                    timestamp: row.get(1)?,
+                    app_name: row.get(2)?,
+                    window_title: row.get(3)?,
+                    screenshot_path: row.get(4)?,
+                    ocr_text: row.get(5)?,
+                    category: row.get(6)?,
+                    duration: row.get(7)?,
+                    browser_url: row.get(8)?,
+                    executable_path: row.get(9)?,
+                    semantic_category: row.get(10)?,
+                    semantic_confidence: row.get(11)?,
+                })
+            })?
+            .filter_map(|row| row.ok())
+            .filter(|activity| {
+                activity
+                    .browser_url
+                    .as_deref()
+                    .and_then(crate::monitor::normalize_domain_rule)
+                    .as_deref()
+                    == Some(target.as_str())
             })
             .collect();
 
@@ -2357,6 +2455,76 @@ mod tests {
         assert!(refreshed
             .iter()
             .all(|activity| activity.semantic_confidence == Some(88)));
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[test]
+    fn 应支持按域名批量读取浏览器历史活动() {
+        let db_path = temp_db_path("reclassify-by-domain");
+        let db = Database::new(&db_path).expect("创建测试数据库失败");
+        let now = chrono::Local::now().timestamp();
+
+        let records = vec![
+            Activity {
+                id: None,
+                timestamp: now - 30,
+                app_name: "Google Chrome".to_string(),
+                window_title: "GitHub Issues".to_string(),
+                screenshot_path: "chrome-a.jpg".to_string(),
+                ocr_text: None,
+                category: "browser".to_string(),
+                duration: 20,
+                browser_url: Some("https://github.com/issues/28".to_string()),
+                executable_path: None,
+                semantic_category: Some("编码开发".to_string()),
+                semantic_confidence: Some(82),
+            },
+            Activity {
+                id: None,
+                timestamp: now - 10,
+                app_name: "Arc".to_string(),
+                window_title: "Pull Requests".to_string(),
+                screenshot_path: "arc-a.jpg".to_string(),
+                ocr_text: None,
+                category: "browser".to_string(),
+                duration: 30,
+                browser_url: Some("https://github.com/pulls".to_string()),
+                executable_path: None,
+                semantic_category: Some("编码开发".to_string()),
+                semantic_confidence: Some(80),
+            },
+            Activity {
+                id: None,
+                timestamp: now - 5,
+                app_name: "Google Chrome".to_string(),
+                window_title: "Docs".to_string(),
+                screenshot_path: "chrome-b.jpg".to_string(),
+                ocr_text: None,
+                category: "browser".to_string(),
+                duration: 15,
+                browser_url: Some("https://docs.github.com/en".to_string()),
+                executable_path: None,
+                semantic_category: Some("资料阅读".to_string()),
+                semantic_confidence: Some(76),
+            },
+        ];
+
+        for activity in &records {
+            db.insert_activity(activity).expect("插入测试数据失败");
+        }
+
+        let matched = db
+            .get_activities_by_domain("github.com")
+            .expect("按域名读取历史活动失败");
+        assert_eq!(matched.len(), 2);
+        assert!(matched.iter().all(|activity| {
+            activity
+                .browser_url
+                .as_deref()
+                .unwrap_or_default()
+                .contains("github.com/")
+        }));
 
         let _ = std::fs::remove_file(db_path);
     }

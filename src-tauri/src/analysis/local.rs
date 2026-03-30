@@ -8,6 +8,15 @@ use serde_json::json;
 use std::path::Path;
 use std::time::Duration;
 
+fn format_domain_label(domain: &crate::database::DomainUsage) -> String {
+    match domain.semantic_category.as_deref().map(str::trim) {
+        Some(semantic_category) if !semantic_category.is_empty() => {
+            format!("{}（{}）", domain.domain, semantic_category)
+        }
+        _ => domain.domain.clone(),
+    }
+}
+
 /// 本地多模态分析器
 /// 使用 Ollama 运行本地多模态模型（如 LLaVA）
 pub struct LocalAnalyzer {
@@ -54,7 +63,7 @@ impl LocalAnalyzer {
             .domain_usage
             .iter()
             .take(3)
-            .map(|d| d.domain.clone())
+            .map(format_domain_label)
             .collect::<Vec<_>>()
             .join(", ");
 
@@ -73,7 +82,7 @@ impl LocalAnalyzer {
 
         let prompt = append_custom_prompt(
             format!(
-            r#"你是一位风趣幽默的工作效率分析师。请根据以下打工人今日的工作数据，生成一份有温度的工作分析。
+                r#"你是一位风趣幽默的工作效率分析师。请根据以下打工人今日的工作数据，生成一份有温度的工作分析。
 
 ## 今日数据
 - 日期：{} 
@@ -95,20 +104,20 @@ impl LocalAnalyzer {
 （给一条接地气的效率改进建议，可以带点幽默）
 
 注意：直接输出内容，不要有任何额外说明。"#,
-            date,
-            format_duration(stats.total_duration),
-            apps_list,
-            if urls_list.is_empty() {
-                "无".to_string()
-            } else {
-                urls_list
-            },
-            if keywords.is_empty() {
-                "无".to_string()
-            } else {
-                keywords.join("、")
-            }
-        ),
+                date,
+                format_duration(stats.total_duration),
+                apps_list,
+                if urls_list.is_empty() {
+                    "无".to_string()
+                } else {
+                    urls_list
+                },
+                if keywords.is_empty() {
+                    "无".to_string()
+                } else {
+                    keywords.join("、")
+                }
+            ),
             &self.custom_prompt,
         );
 
@@ -238,7 +247,7 @@ impl Analyzer for LocalAnalyzer {
             for domain in stats.domain_usage.iter().take(5) {
                 report.push_str(&format!(
                     "- **{}**: {}\n",
-                    domain.domain,
+                    format_domain_label(domain),
                     format_duration(domain.duration)
                 ));
             }

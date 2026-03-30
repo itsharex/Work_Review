@@ -411,6 +411,31 @@ pub fn browser_page_domain_label(page_hint: &str) -> String {
     page_hint.trim().to_string()
 }
 
+pub fn normalize_domain_rule(value: &str) -> Option<String> {
+    let domain = browser_page_domain_label(value).trim().to_lowercase();
+    if domain.is_empty() {
+        None
+    } else {
+        Some(domain)
+    }
+}
+
+pub fn find_website_semantic_override(
+    rules: &[crate::config::WebsiteSemanticRule],
+    browser_url: Option<&str>,
+) -> Option<String> {
+    let target_domain = browser_url.and_then(normalize_domain_rule)?;
+
+    rules.iter().find_map(|rule| {
+        let rule_domain = normalize_domain_rule(&rule.domain)?;
+        if rule_domain == target_domain {
+            Some(rule.semantic_category.trim().to_string())
+        } else {
+            None
+        }
+    })
+}
+
 fn firefox_family_profile_dir_from_ini(base_dir: &Path, ini_content: &str) -> Option<PathBuf> {
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum SectionKind {

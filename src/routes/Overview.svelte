@@ -5,6 +5,8 @@
   import StatsCard from '../lib/components/StatsCard.svelte';
   import AppUsageChart from '../lib/components/AppUsageChart.svelte';
   import { cache } from '../lib/stores/cache.js';
+  import { confirm } from '../lib/stores/confirm.js';
+  import { showToast } from '../lib/stores/toast.js';
   import { appIconStore, getIconCacheKey, preloadAppIcons } from '../lib/stores/iconCache.js';
   import { resolveAppIconSrc } from '../lib/utils/appVisuals.js';
   import { formatBrowserUrlForDisplay } from '../lib/utils/browserUrl.js';
@@ -21,6 +23,9 @@
   let overviewRequestId = 0;
   
   let expandedDomains = new Set();
+  let editingDomainKey = null;
+  let editingSemanticCategory = '';
+  let savingDomainKey = null;
   
   // 浏览器统计弹窗
   let selectedBrowser = null;
@@ -61,6 +66,73 @@
       appName,
       appIcons[getIconCacheKey({ appName, executablePath })]
     );
+  }
+
+  function getDomainSemanticLabel(domain) {
+    return domain?.semantic_category?.trim() || '自动识别';
+  }
+
+  function startDomainSemanticEdit(domain) {
+    editingDomainKey = domain.domain;
+    editingSemanticCategory = domain.semantic_category?.trim() || '';
+  }
+
+  function cancelDomainSemanticEdit() {
+    editingDomainKey = null;
+    editingSemanticCategory = '';
+    savingDomainKey = null;
+  }
+
+  function findBrowserUsage(browserName, executablePath = null) {
+    return stats?.browser_usage?.find((browser) =>
+      browser.browser_name === browserName && browser.executable_path === executablePath
+    ) || stats?.browser_usage?.find((browser) => browser.browser_name === browserName) || null;
+  }
+
+  async function refreshOverviewSelection(browserName, executablePath = null) {
+    await loadStats(true);
+    selectedBrowser = findBrowserUsage(browserName, executablePath);
+  }
+
+  async function saveDomainSemanticRule(domain) {
+    const nextCategory = editingSemanticCategory.trim();
+    if (!domain || !nextCategory || savingDomainKey === domain.domain) return;
+    if ((domain.semantic_category?.trim() || '') === nextCategory) {
+      cancelDomainSemanticEdit();
+      return;
+    }
+
+    const confirmed = await confirm({
+      title: '修改网站语义分类',
+      message: `将 ${domain.domain} 的网站语义分类改为“${nextCategory}”。按域名生效，并回填该站点的历史记录。是否继续？`,
+      confirmText: '确认修改',
+      cancelText: '取消',
+      tone: 'warning',
+    });
+    if (!confirmed) return;
+
+    savingDomainKey = domain.domain;
+    const browserName = selectedBrowser?.browser_name;
+    const executablePath = selectedBrowser?.executable_path || null;
+
+    try {
+      const updatedCount = await invoke('set_domain_semantic_rule', {
+        domain: domain.domain,
+        semanticCategory: nextCategory,
+        syncHistory: true,
+      });
+
+      await refreshOverviewSelection(browserName, executablePath);
+      cancelDomainSemanticEdit();
+      showToast(
+        `已将 ${domain.domain} 设为“${nextCategory}”，并同步 ${updatedCount} 条历史记录`,
+        'success'
+      );
+    } catch (e) {
+      console.error('修改网站语义分类失败:', e);
+      showToast(`修改 ${domain.domain} 的网站语义分类失败: ${e}`, 'error');
+      savingDomainKey = null;
+    }
   }
 
   async function refreshOverviewStats({ silent = false } = {}) {
@@ -227,7 +299,10 @@
                    bg-white dark:bg-slate-800/60
                    hover:border-slate-200 dark:hover:border-slate-600 hover:shadow-sm
                    transition-all duration-200"
-            on:click={() => selectedBrowser = browser}
+            on:click={() => {
+              selectedBrowser = browser;
+              cancelDomainSemanticEdit();
+            }}
           >
             <div class="flex items-center gap-2 mb-1.5">
               {#if getAppIconSrc(browser.browser_name, browser.executable_path)}
@@ -331,8 +406,60 @@
                 {domain.urls.length} 页
               </span>
             </div>
-            <span class="text-sm font-medium text-slate-600 dark:text-slate-300">{formatDuration(domain.duration)}</span>
+            <div class="flex items-center gap-2">
+              <span class="text-xs px-2 py-1 rounded-full bg-primary-50 text-primary-700 dark:bg-primary-900/20 dark:text-primary-300">
+                当前分类：{getDomainSemanticLabel(domain)}
+              </span>
+              <button
+                class="text-xs px-2 py-1 rounded-full border border-slate-200 dark:border-slate-600 text-slate-600 dark:text-slate-300 hover:border-primary-300 hover:text-primary-600 transition-colors"
+                on:click={() => {
+                  if (editingDomainKey === domain.domain) {
+                    cancelDomainSemanticEdit();
+                  } else {
+                    startDomainSemanticEdit(domain);
+                  }
+                }}
+              >
+                修改分类
+              </button>
+              <span class="text-sm font-medium text-slate-600 dark:text-slate-300">{formatDuration(domain.duration)}</span>
+            </div>
           </div>
+
+          {#if editingDomainKey === domain.domain}
+            <div class="px-3 py-3 border-t border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900/40 space-y-2">
+              <label class="block text-xs font-medium text-slate-500 dark:text-slate-400">
+                修改分类
+              </label>
+              <div class="flex flex-col gap-2 md:flex-row">
+                <input
+                  class="flex-1 rounded-lg border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 px-3 py-2 text-sm text-slate-700 dark:text-slate-100"
+                  bind:value={editingSemanticCategory}
+                  placeholder="例如：工作跟进、资料阅读、休息娱乐"
+                />
+                <div class="flex items-center gap-2">
+                  <button
+                    class="px-3 py-2 rounded-lg bg-primary-500 text-white text-sm disabled:opacity-50"
+                    disabled={!editingSemanticCategory.trim() || savingDomainKey === domain.domain}
+                    on:click={() => saveDomainSemanticRule(domain)}
+                  >
+                    {#if savingDomainKey === domain.domain}
+                      保存中...
+                    {:else}
+                      保存
+                    {/if}
+                  </button>
+                  <button
+                    class="px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-600 text-sm text-slate-600 dark:text-slate-300"
+                    disabled={savingDomainKey === domain.domain}
+                    on:click={cancelDomainSemanticEdit}
+                  >
+                    取消
+                  </button>
+                </div>
+              </div>
+            </div>
+          {/if}
           
           <!-- URL 列表，支持展开/收起超出的部分 -->
           <div class="divide-y divide-slate-100 dark:divide-slate-700/50">

@@ -169,6 +169,40 @@ pub fn classify_activity_with_base_category(
     if contains_any(
         &url_lower,
         &[
+            "chatgpt.com",
+            "chat.openai.com",
+            "openai.com/chatgpt",
+            "claude.ai",
+            "chat.deepseek.com",
+            "kimi.moonshot.cn",
+            "gemini.google.com",
+            "yuanbao.tencent.com",
+            "tongyi.aliyun.com",
+            "doubao.com",
+        ],
+    ) {
+        add("AI 协作", 58, "浏览器地址命中 AI 对话工具");
+    }
+
+    if contains_any(
+        &title_lower,
+        &[
+            "chatgpt",
+            "claude",
+            "deepseek",
+            "kimi",
+            "gemini",
+            "提示词",
+            "prompt",
+            "大模型",
+        ],
+    ) {
+        add("AI 协作", 24, "窗口标题命中 AI 协作词");
+    }
+
+    if contains_any(
+        &url_lower,
+        &[
             "google.com/search",
             "bing.com/search",
             "baidu.com/s",
@@ -289,9 +323,31 @@ pub fn classify_activity_with_base_category(
             "trello.com",
             "clickup.com",
             "asana.com",
+            "github.com/issues",
+            "github.com/projects",
         ],
     ) {
         add("任务规划", 46, "浏览器地址命中任务规划平台");
+    }
+
+    if contains_any(
+        &url_lower,
+        &[
+            "docs.google.com/document",
+            "docs.google.com/spreadsheets",
+            "docs.feishu.cn",
+            "shimo.im/docs",
+            "yuque.com",
+            "notion.so",
+            "notion.site",
+            "kdocs.cn",
+        ],
+    ) {
+        add("内容撰写", 56, "浏览器地址命中在线文档协作工具");
+    }
+
+    if contains_any(&title_lower, &["云文档", "在线文档", "doc", "document"]) {
+        add("内容撰写", 18, "窗口标题命中在线文档信号");
     }
 
     if contains_any(
@@ -350,9 +406,27 @@ pub fn classify_activity_with_base_category(
 
     if contains_any(
         &title_lower,
-        &["回放", "课程", "直播", "视频", "episode", "movie", "播放"],
+        &[
+            "回放", "课程", "教程", "lesson", "直播", "视频", "episode", "movie", "播放",
+        ],
     ) {
         add("视频内容", 24, "窗口标题命中视频内容词");
+    }
+
+    if contains_any(
+        &url_lower,
+        &[
+            "youtube.com/watch",
+            "youtube.com/playlist",
+            "bilibili.com/video",
+            "bilibili.com/list",
+            "v.qq.com",
+            "iqiyi.com",
+            "youku.com",
+            "netflix.com/watch",
+        ],
+    ) {
+        add("视频内容", 42, "浏览器地址命中视频网站内容页");
     }
 
     if contains_any(
@@ -380,6 +454,22 @@ pub fn classify_activity_with_base_category(
         &["游戏", "动态", "社区", "直播", "刷视频", "推荐"],
     ) {
         add("休息娱乐", 20, "窗口标题命中休息娱乐词");
+    }
+
+    if contains_any(
+        &url_lower,
+        &[
+            "weibo.com",
+            "x.com",
+            "twitter.com",
+            "xiaohongshu.com",
+            "douyin.com",
+            "reddit.com",
+            "tieba.baidu.com",
+            "hupu.com",
+        ],
+    ) {
+        add("休息娱乐", 64, "浏览器地址命中社交媒体或娱乐社区");
     }
 
     if url_lower.contains("github.com/") {
@@ -446,7 +536,7 @@ fn semantic_threshold(label: &str) -> i32 {
         "会议沟通" | "休息娱乐" => 60,
         "即时聊天" | "视频内容" => 50,
         "编码开发" | "内容撰写" | "资料阅读" | "资料调研" => 40,
-        "任务规划" | "设计创作" | "音乐音频" => 42,
+        "任务规划" | "设计创作" | "音乐音频" | "AI 协作" => 42,
         _ => 45,
     }
 }
@@ -522,6 +612,54 @@ mod tests {
         );
 
         assert_eq!(result.semantic_category, "任务规划");
+        assert!(result.confidence >= 60);
+    }
+
+    #[test]
+    fn ai对话站点应识别为_ai_协作() {
+        let result = classify_activity(
+            "Google Chrome",
+            "ChatGPT - 帮我整理日报",
+            Some("https://chatgpt.com/c/abc"),
+        );
+
+        assert_eq!(result.semantic_category, "AI 协作");
+        assert!(result.confidence >= 60);
+    }
+
+    #[test]
+    fn 在线文档站点应识别为内容撰写() {
+        let result = classify_activity(
+            "Google Chrome",
+            "项目周报 - 飞书云文档",
+            Some("https://docs.feishu.cn/docx/abc"),
+        );
+
+        assert_eq!(result.semantic_category, "内容撰写");
+        assert!(result.confidence >= 60);
+    }
+
+    #[test]
+    fn 视频网站教程页应识别为视频内容() {
+        let result = classify_activity(
+            "Google Chrome",
+            "Rust 异步编程教程 - 哔哩哔哩",
+            Some("https://www.bilibili.com/video/BV1xx411c7mD"),
+        );
+
+        assert_eq!(result.semantic_category, "视频内容");
+        assert!(result.confidence >= 60);
+    }
+
+    #[test]
+    fn 社交媒体信息流应识别为休息娱乐() {
+        let result = classify_activity(
+            "Google Chrome",
+            "发现新鲜事",
+            Some("https://weibo.com/home"),
+        );
+
+        assert_eq!(result.semantic_category, "休息娱乐");
         assert!(result.confidence >= 60);
     }
 

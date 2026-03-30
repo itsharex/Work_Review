@@ -230,6 +230,15 @@ pub struct AppCategoryRule {
     pub category: String,
 }
 
+/// 网站语义分类规则
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct WebsiteSemanticRule {
+    /// 域名
+    pub domain: String,
+    /// 目标语义分类
+    pub semantic_category: String,
+}
+
 /// 隐私配置
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct PrivacyConfig {
@@ -382,6 +391,9 @@ pub struct AppConfig {
     /// 应用分类覆盖规则
     #[serde(default)]
     pub app_category_rules: Vec<AppCategoryRule>,
+    /// 网站语义分类覆盖规则
+    #[serde(default)]
+    pub website_semantic_rules: Vec<WebsiteSemanticRule>,
     /// 存储配置
     #[serde(default)]
     pub storage: StorageConfig,
@@ -483,6 +495,7 @@ impl Default for AppConfig {
             vision_model: ModelConfig::default_vision(),
             privacy: PrivacyConfig::default(),
             app_category_rules: Vec::new(),
+            website_semantic_rules: Vec::new(),
             storage: StorageConfig::default(),
             daily_report_custom_prompt: String::new(),
             daily_report_export_dir: None,
@@ -518,6 +531,7 @@ impl AppConfig {
     pub fn normalize(&mut self) {
         self.migrate_legacy_config();
         normalize_app_category_rules(&mut self.app_category_rules);
+        normalize_website_semantic_rules(&mut self.website_semantic_rules);
         self.avatar_scale = normalize_avatar_scale(self.avatar_scale);
         self.avatar_opacity = normalize_avatar_opacity(self.avatar_opacity);
         self.daily_report_custom_prompt = self.daily_report_custom_prompt.trim().to_string();
@@ -698,6 +712,36 @@ fn normalize_app_category_rules(rules: &mut Vec<AppCategoryRule>) {
     *rules = normalized_rules;
 }
 
+fn normalize_website_semantic_rules(rules: &mut Vec<WebsiteSemanticRule>) {
+    use std::collections::HashSet;
+
+    let mut normalized_rules = Vec::new();
+    let mut seen = HashSet::new();
+
+    for rule in rules.iter().rev() {
+        let Some(domain) = crate::monitor::normalize_domain_rule(&rule.domain) else {
+            continue;
+        };
+
+        let semantic_category = rule.semantic_category.trim();
+        if semantic_category.is_empty() {
+            continue;
+        }
+
+        if !seen.insert(domain.clone()) {
+            continue;
+        }
+
+        normalized_rules.push(WebsiteSemanticRule {
+            domain,
+            semantic_category: semantic_category.to_string(),
+        });
+    }
+
+    normalized_rules.reverse();
+    *rules = normalized_rules;
+}
+
 fn normalize_avatar_scale(value: f64) -> f64 {
     if !value.is_finite() {
         return default_avatar_scale();
@@ -730,7 +774,7 @@ mod tests {
     use super::{
         default_avatar_opacity, default_avatar_scale, normalize_app_category_rules,
         normalize_avatar_opacity, normalize_avatar_scale, AppCategoryRule, AppConfig,
-        ScreenshotDisplayMode,
+        ScreenshotDisplayMode, WebsiteSemanticRule,
     };
 
     #[test]
@@ -823,6 +867,34 @@ mod tests {
         assert_eq!(rules[0].app_name, "Firefox");
         assert_eq!(rules[0].category, "office");
         assert_eq!(rules[1].category, "other");
+    }
+
+    #[test]
+    fn 网站语义规则应按域名去重并规范化输入() {
+        let mut config = AppConfig::default();
+        config.website_semantic_rules = vec![
+            WebsiteSemanticRule {
+                domain: " https://github.com/issues ".to_string(),
+                semantic_category: " 任务规划 ".to_string(),
+            },
+            WebsiteSemanticRule {
+                domain: "GitHub.com".to_string(),
+                semantic_category: " 工作跟进 ".to_string(),
+            },
+            WebsiteSemanticRule {
+                domain: "   ".to_string(),
+                semantic_category: "无效".to_string(),
+            },
+        ];
+
+        config.normalize();
+
+        assert_eq!(config.website_semantic_rules.len(), 1);
+        assert_eq!(config.website_semantic_rules[0].domain, "github.com");
+        assert_eq!(
+            config.website_semantic_rules[0].semantic_category,
+            "工作跟进"
+        );
     }
 
     #[test]

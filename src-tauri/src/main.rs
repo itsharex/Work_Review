@@ -534,12 +534,24 @@ pub(crate) fn resolve_activity_classification(
 ) -> activity_classifier::ActivityClassification {
     let base_category =
         monitor::categorize_app_with_rules(&config.app_category_rules, app_name, window_title);
-    activity_classifier::classify_activity_with_base_category(
+    let mut classification = activity_classifier::classify_activity_with_base_category(
         app_name,
         window_title,
         browser_url,
         &base_category,
-    )
+    );
+
+    if let Some(semantic_category) =
+        monitor::find_website_semantic_override(&config.website_semantic_rules, browser_url)
+    {
+        classification.semantic_category = semantic_category.clone();
+        classification.confidence = classification.confidence.max(100);
+        classification
+            .evidence
+            .push(format!("命中网站语义规则: {semantic_category}"));
+    }
+
+    classification
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2272,6 +2284,7 @@ async fn main() {
             commands::get_recent_apps,
             commands::get_app_category_overview,
             commands::set_app_category_rule,
+            commands::set_domain_semantic_rule,
             commands::reclassify_app_history,
             commands::get_storage_stats,
             commands::get_hourly_summaries,
@@ -2344,11 +2357,12 @@ mod tests {
         avatar_monitor_poll_interval_ms_for_platform, avatar_transition_decision,
         effective_dock_visibility, main_window_close_behavior, monitoring_poll_interval_ms,
         monitoring_poll_interval_ms_for_platform, recording_loop_decision,
-        screen_lock_check_interval_ms_for_platform, should_prevent_exit,
-        tray_recording_toggle_action, tray_recording_toggle_label, MainWindowCloseBehavior,
-        RecordingToggleAction,
+        resolve_activity_classification, screen_lock_check_interval_ms_for_platform,
+        should_prevent_exit, tray_recording_toggle_action, tray_recording_toggle_label,
+        MainWindowCloseBehavior, RecordingToggleAction,
     };
     use crate::avatar_engine::{apply_avatar_opacity, default_avatar_state, derive_avatar_state};
+    use crate::config::{AppConfig, WebsiteSemanticRule};
 
     #[test]
     fn 暂停录制时应重置截图计时器() {
@@ -2375,13 +2389,52 @@ mod tests {
     }
 
     #[test]
-    fn 主监控轮询间隔应保持半秒() {
-        assert_eq!(monitoring_poll_interval_ms(), 500);
+    fn 当前平台主监控轮询间隔应匹配平台策略() {
+        assert_eq!(
+            monitoring_poll_interval_ms(),
+            monitoring_poll_interval_ms_for_platform(cfg!(target_os = "macos"))
+        );
     }
 
     #[test]
-    fn 桌宠独立轮询间隔应压到一百八十毫秒() {
-        assert_eq!(avatar_monitor_poll_interval_ms(), 180);
+    fn 当前平台桌宠独立轮询间隔应匹配平台策略() {
+        assert_eq!(
+            avatar_monitor_poll_interval_ms(),
+            avatar_monitor_poll_interval_ms_for_platform(cfg!(target_os = "macos"), true)
+        );
+    }
+
+    #[test]
+    fn 域名语义规则应覆盖浏览器活动默认分类() {
+        let mut config = AppConfig::default();
+        config.website_semantic_rules = vec![WebsiteSemanticRule {
+            domain: "github.com".to_string(),
+            semantic_category: "工作跟进".to_string(),
+        }];
+        config.normalize();
+
+        let classification = resolve_activity_classification(
+            &config,
+            "Google Chrome",
+            "Issue #28",
+            Some("https://github.com/issues/28"),
+        );
+
+        assert_eq!(classification.base_category, "browser");
+        assert_eq!(classification.semantic_category, "工作跟进");
+    }
+
+    #[test]
+    fn 非mac主监控轮询间隔应保持半秒() {
+        assert_eq!(monitoring_poll_interval_ms_for_platform(false), 500);
+    }
+
+    #[test]
+    fn 非mac桌宠活跃轮询间隔应压到一百八十毫秒() {
+        assert_eq!(
+            avatar_monitor_poll_interval_ms_for_platform(false, true),
+            180
+        );
     }
 
     #[test]

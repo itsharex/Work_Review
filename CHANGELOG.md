@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.29] - 2026-03-30
+
+### 新增
+- 新增 README 中英文双文档结构：`README.md` 顶部可直接切换到英文版 `README.en.md`，便于海外用户快速理解安装、能力边界与使用方式。
+- 新增网站语义分类规则第一版：补充常见 AI 工具、在线文档、任务管理、视频站点与社交娱乐平台的默认语义识别，并支持在概览页网站访问弹层内按域名手动修改分类。
+
+### 修复
+- 修复轻量模式下关闭主界面仍只会隐藏窗口的问题：现在点击关闭按钮会真正释放主 Webview，同时继续保留后台记录与托盘，再次打开时按需重建主界面。
+- 修复网站访问只显示裸域名、不够直观的问题：现在域名分类可按规则或手动覆盖，并会按域名回填历史记录，同时在日报中以“域名（语义分类）”的形式体现。
+
+### 优化
+- 优化 macOS 后台轮询策略：主监控、桌宠活跃态/空闲态以及锁屏检测现按平台差异降频，减少后台空转与无效唤醒。
+- 优化浏览器 URL 补全时机：当快路径未拿到地址时，会在真正需要落库前再补做一次窗口级解析，减少浏览器页面统计断裂。
+
 ## [1.0.28] - 2026-03-29
 
 ### 新增

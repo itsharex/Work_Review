@@ -9,6 +9,10 @@
 </p>
 
 <p align="center">
+  <a href="./README.md">中文</a> · <a href="./README.en.md">English</a>
+</p>
+
+<p align="center">
   <a href="https://github.com/wm94i/Work_Review/releases/latest">
     <img src="https://img.shields.io/github/v/release/wm94i/Work_Review?style=flat-square&color=blue" alt="Release">
   </a>
@@ -228,10 +232,25 @@ src-tauri/src/        Rust 后端（监控、数据库、分析、隐私、更�
 
 感谢 [linux.do](https://linux.do/) 社区的交流与讨论支持。
 
-## 历史星标
-
-[![Star History Chart](https://api.star-history.com/svg?repos=wm94i/Work_Review&type=Date)](https://www.star-history.com/#wm94i/Work_Review&Date)
-
 ## License
 
 MIT
+
+## 历史星标
+
+<a href="https://www.star-history.com/#wm94i/Work_Review&Date">
+  <picture>
+    <source
+      media="(prefers-color-scheme: dark)"
+      srcset="https://api.star-history.com/svg?repos=wm94i/Work_Review&type=Date&theme=dark"
+    />
+    <source
+      media="(prefers-color-scheme: light)"
+      srcset="https://api.star-history.com/svg?repos=wm94i/Work_Review&type=Date"
+    />
+    <img
+      alt="Star History Chart"
+      src="https://api.star-history.com/svg?repos=wm94i/Work_Review&type=Date"
+    />
+  </picture>
+</a>

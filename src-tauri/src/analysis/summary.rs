@@ -8,6 +8,15 @@ use serde_json::json;
 use std::path::Path;
 use std::time::Duration;
 
+fn format_domain_label(domain: &crate::database::DomainUsage) -> String {
+    match domain.semantic_category.as_deref().map(str::trim) {
+        Some(semantic_category) if !semantic_category.is_empty() => {
+            format!("{}（{}）", domain.domain, semantic_category)
+        }
+        _ => domain.domain.clone(),
+    }
+}
+
 /// 摘要上传分析器
 /// 只上传统计摘要，不上传原始截图
 pub struct SummaryAnalyzer {
@@ -433,7 +442,7 @@ impl Analyzer for SummaryAnalyzer {
                 report.push_str(&format!(
                     "| {} | {} | {} |\n",
                     i + 1,
-                    domain.domain,
+                    format_domain_label(domain),
                     format_duration(domain.duration)
                 ));
             }
@@ -456,7 +465,7 @@ impl Analyzer for SummaryAnalyzer {
             .domain_usage
             .iter()
             .take(5)
-            .map(|d| d.domain.clone())
+            .map(format_domain_label)
             .collect::<Vec<_>>()
             .join(", ");
 
@@ -466,7 +475,7 @@ impl Analyzer for SummaryAnalyzer {
         // 规整的 AI 提示词（站在共同度过工作一天的角度，深入分析数据）
         let prompt = append_custom_prompt(
             format!(
-            r#"你是用户今天的工作伙伴，陪伴用户度过了这一天。请仔细分析以下数据，提炼出有价值的洞察，生成一份温暖亲切的工作回顾。
+                r#"你是用户今天的工作伙伴，陪伴用户度过了这一天。请仔细分析以下数据，提炼出有价值的洞察，生成一份温暖亲切的工作回顾。
 
 【今日原始数据】
 工作时长：{}
@@ -504,23 +513,23 @@ impl Analyzer for SummaryAnalyzer {
 **今日小结**
 
 用1到2句话，像朋友一样总结今天，给予肯定和鼓励。"#,
-            format_duration(stats.total_duration),
-            if apps_list.is_empty() {
-                "无".to_string()
-            } else {
-                apps_list.clone()
-            },
-            if urls_list.is_empty() {
-                "无".to_string()
-            } else {
-                urls_list
-            },
-            if top_keywords.is_empty() {
-                "无".to_string()
-            } else {
-                top_keywords
-            }
-        ),
+                format_duration(stats.total_duration),
+                if apps_list.is_empty() {
+                    "无".to_string()
+                } else {
+                    apps_list.clone()
+                },
+                if urls_list.is_empty() {
+                    "无".to_string()
+                } else {
+                    urls_list
+                },
+                if top_keywords.is_empty() {
+                    "无".to_string()
+                } else {
+                    top_keywords
+                }
+            ),
             &self.custom_prompt,
         );
 
@@ -529,10 +538,7 @@ impl Analyzer for SummaryAnalyzer {
             Ok(content) => (content.trim().to_string(), true),
             Err(e) => {
                 log::warn!("AI 生成失败: {e}");
-                (
-                    self.generate_fallback_ai_content(&[], &apps_list),
-                    false,
-                )
+                (self.generate_fallback_ai_content(&[], &apps_list), false)
             }
         };
 

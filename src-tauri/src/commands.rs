@@ -1,4 +1,6 @@
-use crate::config::{AiProvider, AiProviderConfig, AppCategoryRule, AppConfig, ModelConfig};
+use crate::config::{
+    AiProvider, AiProviderConfig, AppCategoryRule, AppConfig, ModelConfig, WebsiteSemanticRule,
+};
 use crate::database::Database;
 use crate::database::{Activity, DailyReport, DailyStats, MemorySearchItem};
 use crate::error::AppError;
@@ -4019,6 +4021,47 @@ fn reclassify_app_history_in_state(
     Ok(activities.len())
 }
 
+fn upsert_domain_semantic_rule(config: &mut AppConfig, domain: &str, semantic_category: &str) {
+    let Some(normalized_domain) = crate::monitor::normalize_domain_rule(domain) else {
+        return;
+    };
+    let normalized_semantic_category = semantic_category.trim().to_string();
+
+    if let Some(rule) = config.website_semantic_rules.iter_mut().find(|rule| {
+        crate::monitor::normalize_domain_rule(&rule.domain).as_deref()
+            == Some(normalized_domain.as_str())
+    }) {
+        rule.domain = normalized_domain;
+        rule.semantic_category = normalized_semantic_category;
+        return;
+    }
+
+    config.website_semantic_rules.push(WebsiteSemanticRule {
+        domain: normalized_domain,
+        semantic_category: normalized_semantic_category,
+    });
+}
+
+fn reclassify_domain_history_in_state(
+    state: &AppState,
+    domain: &str,
+    semantic_category: &str,
+) -> Result<usize, AppError> {
+    let activities = state.database.get_activities_by_domain(domain)?;
+    let semantic_category = semantic_category.trim();
+
+    for activity in &activities {
+        state.database.update_activity_classification(
+            activity.id.expect("活动记录应包含主键"),
+            &activity.category,
+            Some(semantic_category),
+            Some(100),
+        )?;
+    }
+
+    Ok(activities.len())
+}
+
 #[tauri::command]
 pub async fn set_app_category_rule(
     app_name: String,
@@ -4057,6 +4100,42 @@ pub async fn reclassify_app_history(
 ) -> Result<usize, AppError> {
     let state = state.lock().map_err(|e| AppError::Unknown(e.to_string()))?;
     reclassify_app_history_in_state(&state, &app_name, &category)
+}
+
+#[tauri::command]
+pub async fn set_domain_semantic_rule(
+    domain: String,
+    semantic_category: String,
+    sync_history: bool,
+    app: AppHandle,
+    state: State<'_, Arc<Mutex<AppState>>>,
+) -> Result<usize, AppError> {
+    let normalized_domain = crate::monitor::normalize_domain_rule(&domain)
+        .ok_or_else(|| AppError::Unknown("域名不能为空".to_string()))?;
+    let trimmed_semantic_category = semantic_category.trim();
+    if trimmed_semantic_category.is_empty() {
+        return Err(AppError::Unknown("语义分类不能为空".to_string()));
+    }
+
+    let next_config = {
+        let state = state.lock().map_err(|e| AppError::Unknown(e.to_string()))?;
+        let mut next_config = state.config.clone();
+        upsert_domain_semantic_rule(
+            &mut next_config,
+            &normalized_domain,
+            trimmed_semantic_category,
+        );
+        next_config
+    };
+
+    persist_app_config(next_config, app, state.inner())?;
+
+    if !sync_history {
+        return Ok(0);
+    }
+
+    let state = state.lock().map_err(|e| AppError::Unknown(e.to_string()))?;
+    reclassify_domain_history_in_state(&state, &normalized_domain, trimmed_semantic_category)
 }
 
 /// 获取当前运行的应用列表
