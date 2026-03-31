@@ -20,3 +20,15 @@ test('多屏幕截图应按活动窗口所在屏幕选屏', async () => {
   assert.match(screenshotSource, /GetMonitorInfoW/);
   assert.match(screenshotSource, /capture_target_monitor_rect/);
 });
+
+test('选屏辅助函数应在测试构建中可见，避免 Linux cargo test 因条件编译缺失而失败', async () => {
+  const screenshotSource = await readFile(
+    new URL('./src/screenshot.rs', import.meta.url),
+    'utf8'
+  );
+
+  assert.match(
+    screenshotSource,
+    /#\[cfg\(any\(target_os = "macos", target_os = "windows", test\)\)\]\s*fn capture_target_point/
+  );
+});

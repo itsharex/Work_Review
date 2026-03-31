@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.31] - 2026-03-31
+
+### 新增
+- 新增休息提醒：启用桌宠后，可按 30 / 45 / 50 / 60 / 90 / 120 分钟间隔提示起身活动，并支持直接在桌宠气泡上关闭本次提醒。
+- 新增开机自启动启动方式：启用自启动后，可选择“显示主界面”或“静默驻留”，减少系统启动时对当前桌面的打断。
+
+### 修复
+- 修复 macOS 环境下浏览器页面 URL 错误识别的问题：优化 AppleScript 提取规则，对 Value、Description、Title、Name 等候选来源做权重评分，并过滤可疑的纯主机名假链接，提高当前页面 URL 识别精度。
+- 修复浏览器同标题页面更容易漏记导航变化的问题：在切换判定前增加 URL 预探测，并在浏览器标题或地址变化时使用更短的截图冷却时间，减少页面切换记录延迟。
+
+### 优化
+- 优化项目文档入口：新增繁体版 `README.tw.md`，并同步更新中 / 英 / 繁三套 README 的语言切换链接与介绍图，方便不同语言用户查看最新说明。
+
 ## [1.0.30] - 2026-03-30
 
 ### 新增
@@ -16,7 +29,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 修复语言切换后仍复用旧语言日报的问题：当目标语言日报缺失时，会自动补生成当前语言版本。
 - 修复语言菜单文案被裁切的问题，切换菜单现改为左对齐展开，并按“英文缩写 + 语言名称”展示完整文案。
 - 修复网站访问明细在英文日报中仍显示中文语义分类的问题，域名语义标签现会按当前语言输出。
-- 修复 macOS 环境下浏览器页面 URL 错误识别的问题：优化了 AppleScript 提取规则，增加 URL 候选来源（Value、Title、Name 等）权重评估机制，并强制过滤所有可疑的“纯主机名”假链结果，大幅提高前台网页 URL 的抓取精度。
 
 ## [1.0.29] - 2026-03-30
 

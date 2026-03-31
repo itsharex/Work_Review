@@ -130,10 +130,10 @@ pub(crate) fn sync_effective_dock_visibility(app: &AppHandle) {
     commands::apply_dock_visibility(visible, false);
 }
 
-pub(crate) fn configure_main_window(window: &tauri::WebviewWindow) {
+pub(crate) fn configure_main_window(_window: &tauri::WebviewWindow) {
     #[cfg(target_os = "windows")]
     if let Some(icon) = build_windows_window_icon() {
-        if let Err(e) = window.set_icon(icon) {
+        if let Err(e) = _window.set_icon(icon) {
             log::warn!("设置 Windows 主窗口图标失败，继续使用默认图标: {e}");
         }
     }
@@ -142,9 +142,9 @@ pub(crate) fn configure_main_window(window: &tauri::WebviewWindow) {
     {
         use tauri::TitleBarStyle;
 
-        let _ = window.set_decorations(true);
-        let _ = window.set_title_bar_style(TitleBarStyle::Transparent);
-        configure_main_window_collection_behavior(window);
+        let _ = _window.set_decorations(true);
+        let _ = _window.set_title_bar_style(TitleBarStyle::Transparent);
+        configure_main_window_collection_behavior(_window);
     }
 }
 

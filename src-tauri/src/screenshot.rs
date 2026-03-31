@@ -1,7 +1,11 @@
 use crate::config::{ScreenshotDisplayMode, StorageConfig};
 use crate::error::{AppError, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
-use image::{imageops::FilterType, ColorType, DynamicImage, RgbaImage};
+use image::{imageops::FilterType, ColorType};
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+use image::DynamicImage;
+#[cfg(target_os = "macos")]
+use image::RgbaImage;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 
@@ -954,7 +958,7 @@ impl ScreenshotService {
     }
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 fn capture_target_point(
     active_window: Option<&crate::monitor::ActiveWindow>,
 ) -> Option<(i32, i32)> {
@@ -975,6 +979,7 @@ fn should_capture_all_displays(config: &ScreenshotConfig) -> bool {
     config.display_mode == ScreenshotDisplayMode::All
 }
 
+#[cfg(target_os = "macos")]
 fn display_pixel_offset(value: i32, scale_factor: f32) -> i32 {
     ((value as f32) * scale_factor.max(1.0)).round() as i32
 }

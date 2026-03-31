@@ -4,12 +4,14 @@ use crate::error::Result;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use serde_json::Value;
+#[cfg(any(target_os = "macos", test))]
 use std::collections::HashMap;
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 use std::process::{Command, Output, Stdio};
+#[cfg(target_os = "macos")]
 use std::sync::Mutex;
 #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 use std::thread;
@@ -28,11 +30,11 @@ static URL_LIKE_RE: Lazy<Regex> = Lazy::new(|| {
     .expect("URL regex should compile")
 });
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(target_os = "macos")]
 static LAST_BROWSER_URL_LOGS: Lazy<Mutex<HashMap<String, String>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", test))]
 fn remember_browser_url_log(cache: &mut HashMap<String, String>, key: &str, url: &str) -> bool {
     match cache.get(key) {
         Some(previous) if previous == url => false,
@@ -43,7 +45,7 @@ fn remember_browser_url_log(cache: &mut HashMap<String, String>, key: &str, url:
     }
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(target_os = "macos")]
 fn log_browser_url_once(log_key: &str, message: &str, url: &str) {
     let mut cache = LAST_BROWSER_URL_LOGS
         .lock()
@@ -2873,6 +2875,7 @@ pub fn get_visible_windows() -> Result<Vec<ActiveWindow>> {
 
 /// 获取所有可见窗口 (非 macOS)
 #[cfg(not(target_os = "macos"))]
+#[allow(dead_code)]
 pub fn get_visible_windows() -> Result<Vec<ActiveWindow>> {
     // 非 macOS 平台暂不支持多窗口
     get_active_window().map(|w| vec![w])

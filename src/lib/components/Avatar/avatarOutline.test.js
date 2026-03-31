@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
 import { AVATAR_OUTLINE_LAYOUT, getAvatarOutline } from './avatarOutline.js';
+import { formatBubbleMessage } from './bubbleMessage.js';
 
 test('桌宠应保持纯轮廓布局，不再包含桌面或方框结构', () => {
   assert.equal(AVATAR_OUTLINE_LAYOUT.showDesk, false);
@@ -94,8 +95,17 @@ test('休息提醒气泡应支持常驻显示和手动关闭', () => {
 
   assert.match(source, /export let onClose = \(\) => \{\};/);
   assert.match(source, /bubble\?\.persistent/);
-  assert.match(source, /on:click=\{onClose\}/);
+  assert.match(source, /class="absolute inset-0 z-20 overflow-visible pointer-events-none"/);
+  assert.match(source, /class="pointer-events-auto relative rounded-\[22px\]/);
+  assert.match(source, /<button[\s\S]*type="button"[\s\S]*on:click=\{onClose\}/);
   assert.match(source, /aria-label="关闭提醒"/);
   assert.match(windowSource, /<AvatarPopover \{bubble\} onClose=\{dismissBubble\} \/>/);
   assert.match(windowSource, /if \(!payload\?\.persistent\)/);
+});
+
+test('英文桌宠气泡文案应保留单词间空格', () => {
+  assert.equal(
+    formatBubbleMessage('Time for a break. Stand up and stretch a bit.'),
+    'Time for a break. Stand up and stretch a bit.'
+  );
 });

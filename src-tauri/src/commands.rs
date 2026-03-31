@@ -4789,7 +4789,7 @@ fn macos_significant_name_tokens(value: &str) -> Vec<String> {
     tokens
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(target_os = "macos")]
 fn macos_bundle_path_from_executable(executable_path: &str) -> Option<PathBuf> {
     let path = Path::new(executable_path);
     for ancestor in path.ancestors() {
@@ -4839,7 +4839,7 @@ fn macos_score_app_bundle_name(app_name: &str, bundle_name: &str) -> i32 {
     score
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(target_os = "macos")]
 fn collect_macos_app_bundles(root: &Path, depth: usize, bundles: &mut Vec<PathBuf>) {
     if depth == 0 || !root.exists() {
         return;
@@ -4869,7 +4869,7 @@ fn collect_macos_app_bundles(root: &Path, depth: usize, bundles: &mut Vec<PathBu
     }
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(target_os = "macos")]
 fn macos_icon_app_path_candidates(app_name: &str, executable_path: Option<&str>) -> Vec<String> {
     let mut candidates: Vec<(i32, String)> = Vec::new();
 
@@ -5107,116 +5107,6 @@ fn merge_windows_icon_lookup_candidates(
 
     for path in known_icon_paths {
         push_candidate(&path);
-    }
-
-    candidates
-}
-
-#[cfg(target_os = "windows")]
-fn windows_icon_process_candidates(app_name: &str) -> Vec<String> {
-    let trimmed = app_name
-        .trim()
-        .trim_end_matches(".exe")
-        .trim_end_matches(".EXE")
-        .trim();
-    let normalized = trimmed.to_lowercase();
-    let compact = normalized
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric())
-        .collect::<String>();
-
-    let mut candidates = Vec::new();
-    let mut push_candidate = |value: &str| {
-        let candidate = value.trim().to_lowercase();
-        if !candidate.is_empty() && !candidates.contains(&candidate) {
-            candidates.push(candidate);
-        }
-    };
-
-    push_candidate(trimmed);
-    push_candidate(&normalized);
-    push_candidate(&compact);
-
-    match compact.as_str() {
-        "chrome" | "googlechrome" => {
-            push_candidate("chrome");
-            push_candidate("google chrome");
-        }
-        "msedge" | "edge" | "microsoftedge" => {
-            push_candidate("msedge");
-            push_candidate("microsoft edge");
-            push_candidate("edge");
-        }
-        "brave" | "bravebrowser" => {
-            push_candidate("brave");
-            push_candidate("brave browser");
-        }
-        "firefox" => push_candidate("firefox"),
-        "safari" => push_candidate("safari"),
-        "opera" => push_candidate("opera"),
-        "vivaldi" => push_candidate("vivaldi"),
-        "chromium" => push_candidate("chromium"),
-        "arc" => push_candidate("arc"),
-        "zen" | "zenbrowser" => {
-            push_candidate("zen");
-            push_candidate("zen browser");
-        }
-        "code" | "vscode" | "visualstudiocode" => {
-            push_candidate("code");
-            push_candidate("vs code");
-            push_candidate("visual studio code");
-        }
-        "cursor" => push_candidate("cursor"),
-        "wechat" | "weixin" => {
-            push_candidate("wechat");
-            push_candidate("weixin");
-        }
-        "wecom" => {
-            push_candidate("wecom");
-            push_candidate("wxwork");
-        }
-        "qq" => push_candidate("qq"),
-        "qqbrowser" => push_candidate("qqbrowser"),
-        "360se" | "360chrome" => {
-            push_candidate("360se");
-            push_candidate("360chrome");
-        }
-        "sogouexplorer" => push_candidate("sogouexplorer"),
-        "explorer" | "fileexplorer" => {
-            push_candidate("explorer");
-            push_candidate("file explorer");
-        }
-        "windowsterminal" => {
-            push_candidate("windowsterminal");
-            push_candidate("windows terminal");
-        }
-        "powershell" | "pwsh" => {
-            push_candidate("powershell");
-            push_candidate("pwsh");
-        }
-        "cmd" | "commandprompt" => {
-            push_candidate("cmd");
-            push_candidate("command prompt");
-        }
-        "winword" | "microsoftword" => {
-            push_candidate("winword");
-            push_candidate("word");
-            push_candidate("microsoft word");
-        }
-        "excel" | "microsoftexcel" => {
-            push_candidate("excel");
-            push_candidate("microsoft excel");
-        }
-        "powerpnt" | "powerpoint" | "microsoftpowerpoint" => {
-            push_candidate("powerpnt");
-            push_candidate("powerpoint");
-            push_candidate("microsoft powerpoint");
-        }
-        "outlook" | "microsoftoutlook" => {
-            push_candidate("outlook");
-            push_candidate("microsoft outlook");
-        }
-        _ => {}
     }
 
     candidates

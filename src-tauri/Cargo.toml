@@ -1,6 +1,6 @@
 [package]
 name = "work-review"
-version = "1.0.30"
+version = "1.0.31"
 
 description = "个人工作回顾与AI日报助手"
 authors = ["WorkReview Team"]
@@ -82,3 +82,5 @@ strip = true
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
+# Compatibility shim for old objc macros that still expand cfg(feature = "cargo-clippy")
+cargo-clippy = []
