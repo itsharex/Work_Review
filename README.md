@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <a href="./README.md">中文</a> · <a href="./README.en.md">English</a>
+  <a href="./README.md">简体中文</a> · <a href="./README.tw.md">繁體中文</a> · <a href="./README.en.md">English</a>
 </p>
 
 <p align="center">
@@ -94,13 +94,13 @@ Work Review 更像一套面向个人的工作留痕系统：
 
 ### 今日概览
 
-<img src="docs/概览.png" alt="Work Review 今日概览" />
+<img src="docs/Introduction_zh/概览.png" alt="Work Review 今日概览" />
 
 概览页会把当天的总时长、办公时长、浏览器使用、网站访问、按小时活跃度和应用分布放在同一屏里，适合先快速判断今天的工作重心。
 
 ### 工作助手
 
-<img src="docs/助手.png" alt="Work Review 工作助手" />
+<img src="docs/Introduction_zh/助手.png" alt="Work Review 工作助手" />
 
 助手页直接基于你的本地记录回答问题，适合拿来做当天回顾、阶段总结和待办梳理。
 

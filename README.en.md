@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <a href="./README.md">中文</a> · <a href="./README.en.md">English</a>
+  <a href="./README.md">简体中文</a> · <a href="./README.tw.md">繁體中文</a> · <a href="./README.en.md">English</a>
 </p>
 
 <p align="center">
@@ -92,13 +92,13 @@ Work Review is closer to a personal work-trace system:
 
 ### Today Overview
 
-<img src="docs/概览.png" alt="Work Review Overview" />
+<img src="docs/Introduction_en/概览.png" alt="Work Review Overview" />
 
 The overview page combines total duration, work duration, browser usage, website access, hourly activity patterns, and app distribution in one place.
 
 ### Assistant
 
-<img src="docs/助手.png" alt="Work Review Assistant" />
+<img src="docs/Introduction_en/助手.png" alt="Work Review Assistant" />
 
 The assistant answers directly from your local records and is useful for recap, summaries, and todo extraction.
 
