@@ -2,6 +2,7 @@
   import { invoke } from '@tauri-apps/api/core';
   import { link } from 'svelte-spa-router';
   import { formatDurationLocalized, locale, t } from '$lib/i18n/index.js';
+  import LocalizedDatePicker from '../../lib/components/LocalizedDatePicker.svelte';
 
   function getLocalDateString() {
     const now = new Date();
@@ -54,12 +55,11 @@
     </div>
     
     {#key `timeline-summary-date-${currentLocale}`}
-      <input
-        type="date"
+      <LocalizedDatePicker
         bind:value={selectedDate}
         max={getLocalDateString()}
-        lang={currentLocale}
-        class="px-3 py-1.5 text-sm rounded-lg border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-700 text-slate-800 dark:text-white"
+        localeCode={currentLocale}
+        triggerClass="page-control-input w-auto"
       />
     {/key}
   </div>

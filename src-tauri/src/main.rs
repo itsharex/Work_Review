@@ -685,8 +685,14 @@ struct RecordingLoopDecision {
     reset_capture_clock: bool,
 }
 
+const ACTIVITY_INPUT_IDLE_SUSPECT_MINUTES: u64 = 3;
+const ACTIVITY_INPUT_IDLE_HARD_STOP_MINUTES: u64 = 20;
+const ACTIVITY_INPUT_IDLE_HARD_STOP_SECS: u64 =
+    ACTIVITY_INPUT_IDLE_HARD_STOP_MINUTES * 60;
+
 fn should_confirm_idle(
     input_idle: bool,
+    input_idle_seconds: u64,
     screenshots_enabled: bool,
     screenshot_confirmed: bool,
 ) -> bool {
@@ -694,11 +700,107 @@ fn should_confirm_idle(
         return false;
     }
 
+    // 长时间无输入时直接切断时长，避免后台程序或动态页面无限续时。
+    if input_idle_seconds >= ACTIVITY_INPUT_IDLE_HARD_STOP_SECS {
+        return true;
+    }
+
     if screenshots_enabled {
         screenshot_confirmed
     } else {
         true
     }
+}
+
+fn previous_app_backfill_duration(
+    app_changed: bool,
+    duration_to_record: i64,
+    was_input_idle: bool,
+    is_confirmed_idle: bool,
+) -> i64 {
+    if !app_changed || duration_to_record <= 0 || was_input_idle || is_confirmed_idle {
+        0
+    } else {
+        duration_to_record
+    }
+}
+
+fn resolve_previous_activity_to_backfill(
+    state: &Arc<Mutex<AppState>>,
+    previous_app_name: Option<&str>,
+    previous_browser_url: Option<&str>,
+    previous_window_title: Option<&str>,
+) -> Option<database::Activity> {
+    let Some(previous_app_name) = previous_app_name else {
+        return None;
+    };
+
+    let state_guard = state.lock().unwrap_or_else(|e| e.into_inner());
+
+    if let Some(previous_url) = previous_browser_url.filter(|url| !url.is_empty()) {
+        state_guard
+            .database
+            .get_latest_activity_by_url(previous_url)
+            .ok()
+            .flatten()
+    } else if monitor::is_browser_app(previous_app_name) {
+        previous_window_title
+            .filter(|title| !title.is_empty())
+            .and_then(|title| {
+                state_guard
+                    .database
+                    .get_latest_activity_by_app_title(previous_app_name, title)
+                    .ok()
+                    .flatten()
+            })
+            .or_else(|| {
+                state_guard
+                    .database
+                    .get_latest_activity_by_app(previous_app_name)
+                    .ok()
+                    .flatten()
+            })
+    } else {
+        state_guard
+            .database
+            .get_latest_activity_by_app(previous_app_name)
+            .ok()
+            .flatten()
+    }
+}
+
+fn backfill_previous_activity_if_needed(
+    state: &Arc<Mutex<AppState>>,
+    previous_activity: Option<&database::Activity>,
+    duration_delta: i64,
+    current_timestamp: i64,
+    current_app_name: &str,
+) {
+    if duration_delta <= 0 {
+        return;
+    }
+
+    let Some(previous_activity) = previous_activity else {
+        return;
+    };
+    let Some(previous_id) = previous_activity.id else {
+        return;
+    };
+
+    let state_guard = state.lock().unwrap_or_else(|e| e.into_inner());
+    let _ = state_guard.database.merge_activity(
+        previous_id,
+        duration_delta,
+        None,
+        &previous_activity.screenshot_path,
+        current_timestamp,
+    );
+    log::debug!(
+        "⏱️ 时长回补: {} +{}s (切换到 {})",
+        previous_activity.app_name,
+        duration_delta,
+        current_app_name
+    );
 }
 
 fn recording_loop_decision(
@@ -1131,9 +1233,8 @@ async fn background_screenshot_task(state: Arc<Mutex<AppState>>, app: AppHandle)
     let mut last_capture_time = std::time::Instant::now();
 
     // ===== 空闲检测器 =====
-    // 固定 3 分钟空闲阈值：无键鼠操作且屏幕内容无变化时暂停计时
-    const IDLE_TIMEOUT_MINUTES: u64 = 3;
-    let idle_detector = idle_detector::IdleDetector::new(IDLE_TIMEOUT_MINUTES);
+    // 先以输入空闲进入“疑似空闲”，再结合前台变化做短时保留。
+    let idle_detector = idle_detector::IdleDetector::new(ACTIVITY_INPUT_IDLE_SUSPECT_MINUTES);
     let mut last_idle_log_time = std::time::Instant::now();
     let mut is_currently_idle = false; // 当前是否处于空闲状态
 
@@ -1342,8 +1443,11 @@ async fn background_screenshot_task(state: Arc<Mutex<AppState>>, app: AppHandle)
         }
 
         // ===== 空闲检测第一阶段：键鼠活动检查 =====
-        let input_idle = idle_detector.is_input_idle();
+        let input_idle_seconds = idle_detector.get_idle_seconds();
+        let input_idle =
+            input_idle_seconds >= ACTIVITY_INPUT_IDLE_SUSPECT_MINUTES * 60;
 
+        let was_input_idle = is_currently_idle;
         // 每 30 秒打印一次空闲状态日志（避免刷屏）
         if last_idle_log_time.elapsed() >= Duration::from_secs(30) {
             if input_idle != is_currently_idle {
@@ -1353,10 +1457,10 @@ async fn background_screenshot_task(state: Arc<Mutex<AppState>>, app: AppHandle)
                     log::info!("▶️  检测到用户活动，恢复正常记录");
                     idle_detector.reset();
                 }
-                is_currently_idle = input_idle;
             }
             last_idle_log_time = std::time::Instant::now();
         }
+        is_currently_idle = input_idle;
 
         // ===== 判断是否截图 =====
         // 1. 定时触发：到达配置的间隔时间
@@ -1448,6 +1552,23 @@ async fn background_screenshot_task(state: Arc<Mutex<AppState>>, app: AppHandle)
         };
         // 锁已释放
 
+        let current_timestamp = chrono::Local::now().timestamp();
+        let previous_activity_to_backfill = if app_changed {
+            resolve_previous_activity_to_backfill(
+                &state,
+                previous_app_name.as_deref(),
+                previous_browser_url.as_deref(),
+                previous_window_title.as_deref(),
+            )
+        } else {
+            None
+        };
+        let adjusted_duration = if app_changed {
+            0i64
+        } else {
+            duration_to_record
+        };
+
         use privacy::PrivacyAction;
         let result: Option<database::Activity> = match privacy_action {
             PrivacyAction::Skip => {
@@ -1473,28 +1594,54 @@ async fn background_screenshot_task(state: Arc<Mutex<AppState>>, app: AppHandle)
                         active_window.browser_url.as_deref(),
                     )
                 };
-                let activity = database::Activity {
-                    id: None,
-                    timestamp: chrono::Local::now().timestamp(),
-                    app_name: active_window.app_name,
-                    window_title: "[内容已脱敏]".to_string(),
-                    screenshot_path: String::new(),
-                    ocr_text: None,
-                    category: classification.base_category,
-                    duration: duration_to_record,
-                    browser_url: None,
-                    executable_path: active_window.executable_path,
-                    semantic_category: Some(classification.semantic_category),
-                    semantic_confidence: Some(i32::from(classification.confidence)),
+                let anonymized_is_confirmed_idle =
+                    should_confirm_idle(input_idle, input_idle_seconds, false, false);
+                let previous_effective_duration = previous_app_backfill_duration(
+                    app_changed,
+                    duration_to_record,
+                    was_input_idle,
+                    anonymized_is_confirmed_idle,
+                );
+                backfill_previous_activity_if_needed(
+                    &state,
+                    previous_activity_to_backfill.as_ref(),
+                    previous_effective_duration,
+                    current_timestamp,
+                    &active_window.app_name,
+                );
+                let effective_duration = if anonymized_is_confirmed_idle {
+                    log::debug!("空闲确认: 脱敏活动跳过时长记录");
+                    0
+                } else {
+                    adjusted_duration
                 };
 
-                // 短暂获取锁写入数据库
-                let state_guard = state.lock().unwrap_or_else(|e| e.into_inner());
-                match state_guard.database.insert_activity(&activity) {
-                    Ok(_) => Some(activity),
-                    Err(e) => {
-                        log::error!("保存活动记录失败: {e}");
-                        None
+                if effective_duration <= 0 && !app_changed {
+                    None
+                } else {
+                    let activity = database::Activity {
+                        id: None,
+                        timestamp: current_timestamp,
+                        app_name: active_window.app_name,
+                        window_title: "[内容已脱敏]".to_string(),
+                        screenshot_path: String::new(),
+                        ocr_text: None,
+                        category: classification.base_category,
+                        duration: effective_duration,
+                        browser_url: None,
+                        executable_path: active_window.executable_path,
+                        semantic_category: Some(classification.semantic_category),
+                        semantic_confidence: Some(i32::from(classification.confidence)),
+                    };
+
+                    // 短暂获取锁写入数据库
+                    let state_guard = state.lock().unwrap_or_else(|e| e.into_inner());
+                    match state_guard.database.insert_activity(&activity) {
+                        Ok(_) => Some(activity),
+                        Err(e) => {
+                            log::error!("保存活动记录失败: {e}");
+                            None
+                        }
                     }
                 }
             }
@@ -1512,71 +1659,6 @@ async fn background_screenshot_task(state: Arc<Mutex<AppState>>, app: AppHandle)
                     )
                 };
                 let category = classification.base_category.clone();
-                let current_timestamp = chrono::Local::now().timestamp();
-
-                // ===== 应用切换时长归属修正 =====
-                // 切换应用时，上次截图到现在的时长应归属于上一个应用
-                // 新应用从 0 开始计时，避免"偷"到上个应用的使用时长
-                let adjusted_duration = if app_changed {
-                    if let Some(ref prev_app) = previous_app_name {
-                        let state_guard = state.lock().unwrap_or_else(|e| e.into_inner());
-                        let prev_activity = if let Some(prev_url) = previous_browser_url
-                            .as_deref()
-                            .filter(|url| !url.is_empty())
-                        {
-                            state_guard
-                                .database
-                                .get_latest_activity_by_url(prev_url)
-                                .ok()
-                                .flatten()
-                        } else if monitor::is_browser_app(prev_app) {
-                            previous_window_title
-                                .as_deref()
-                                .filter(|title| !title.is_empty())
-                                .and_then(|title| {
-                                    state_guard
-                                        .database
-                                        .get_latest_activity_by_app_title(prev_app, title)
-                                        .ok()
-                                        .flatten()
-                                })
-                                .or_else(|| {
-                                    state_guard
-                                        .database
-                                        .get_latest_activity_by_app(prev_app)
-                                        .ok()
-                                        .flatten()
-                                })
-                        } else {
-                            state_guard
-                                .database
-                                .get_latest_activity_by_app(prev_app)
-                                .ok()
-                                .flatten()
-                        };
-
-                        if let Some(prev_activity) = prev_activity {
-                            if let Some(prev_id) = prev_activity.id {
-                                let _ = state_guard.database.merge_activity(
-                                    prev_id,
-                                    duration_to_record,
-                                    None,
-                                    &prev_activity.screenshot_path,
-                                    current_timestamp,
-                                );
-                                log::debug!(
-                                    "⏱️ 时长回补: {} +{}s (切换到 {})",
-                                    prev_app,
-                                    duration_to_record,
-                                    active_window.app_name
-                                );
-                            }
-                        }
-                    }
-                    0i64
-                } else {
-                    duration_to_record
-                };
 
                 // 先检查是否有可合并的记录（在截屏之前判断，避免不必要的截图保存）
                 let latest_activity = {
@@ -1668,8 +1750,25 @@ async fn background_screenshot_task(state: Arc<Mutex<AppState>>, app: AppHandle)
                         idle_detector.reset();
                         false
                     };
-                    let is_confirmed_idle =
-                        should_confirm_idle(input_idle, screenshots_enabled, screenshot_idle);
+                    let is_confirmed_idle = should_confirm_idle(
+                        input_idle,
+                        input_idle_seconds,
+                        screenshots_enabled,
+                        screenshot_idle,
+                    );
+                    let previous_effective_duration = previous_app_backfill_duration(
+                        app_changed,
+                        duration_to_record,
+                        was_input_idle,
+                        is_confirmed_idle,
+                    );
+                    backfill_previous_activity_if_needed(
+                        &state,
+                        previous_activity_to_backfill.as_ref(),
+                        previous_effective_duration,
+                        current_timestamp,
+                        &active_window.app_name,
+                    );
 
                     // 如果确认空闲，跳过时长记录
                     let effective_duration = if is_confirmed_idle {
@@ -1849,8 +1948,22 @@ async fn background_screenshot_task(state: Arc<Mutex<AppState>>, app: AppHandle)
                                 };
                                 let is_confirmed_idle = should_confirm_idle(
                                     input_idle,
+                                    input_idle_seconds,
                                     screenshots_enabled,
                                     screenshot_idle,
+                                );
+                                let previous_effective_duration = previous_app_backfill_duration(
+                                    app_changed,
+                                    duration_to_record,
+                                    was_input_idle,
+                                    is_confirmed_idle,
+                                );
+                                backfill_previous_activity_if_needed(
+                                    &state,
+                                    previous_activity_to_backfill.as_ref(),
+                                    previous_effective_duration,
+                                    current_timestamp,
+                                    &active_window.app_name,
                                 );
 
                                 // 如果确认空闲，跳过时长记录（但仍创建活动记录以保持截图）
@@ -1965,8 +2078,25 @@ async fn background_screenshot_task(state: Arc<Mutex<AppState>>, app: AppHandle)
                             }
                         }
                     } else {
-                        let is_confirmed_idle =
-                            should_confirm_idle(input_idle, screenshots_enabled, false);
+                        let is_confirmed_idle = should_confirm_idle(
+                            input_idle,
+                            input_idle_seconds,
+                            screenshots_enabled,
+                            false,
+                        );
+                        let previous_effective_duration = previous_app_backfill_duration(
+                            app_changed,
+                            duration_to_record,
+                            was_input_idle,
+                            is_confirmed_idle,
+                        );
+                        backfill_previous_activity_if_needed(
+                            &state,
+                            previous_activity_to_backfill.as_ref(),
+                            previous_effective_duration,
+                            current_timestamp,
+                            &active_window.app_name,
+                        );
                         let effective_duration = if is_confirmed_idle {
                             log::debug!("关闭截图后按输入空闲判定，新活动时长设为 0");
                             0
@@ -2038,6 +2168,13 @@ async fn background_screenshot_task(state: Arc<Mutex<AppState>>, app: AppHandle)
 
             if ow_privacy == privacy::PrivacyAction::Skip {
                 log::debug!("浮动窗口跳过(隐私): {}", ow.app_name);
+                continue;
+            }
+
+            let overlay_is_confirmed_idle =
+                should_confirm_idle(input_idle, input_idle_seconds, false, false);
+            if overlay_is_confirmed_idle {
+                log::debug!("浮动窗口空闲确认，跳过时长记录: {}", ow.app_name);
                 continue;
             }
 
@@ -2729,7 +2866,7 @@ mod tests {
         browser_change_capture_min_interval_ms, effective_dock_visibility,
         launch_args_contain_autostart, main_window_close_behavior, monitoring_poll_interval_ms,
         monitoring_poll_interval_ms_for_platform, recording_loop_decision,
-        resolve_activity_classification, reusable_cached_active_window,
+        previous_app_backfill_duration, resolve_activity_classification, reusable_cached_active_window,
         screen_lock_check_interval_ms_for_platform, should_confirm_idle,
         should_hide_main_window_on_setup, should_prevent_exit,
         should_probe_browser_url_before_change_detection, tray_recording_toggle_action,
@@ -2767,14 +2904,29 @@ mod tests {
 
     #[test]
     fn 关闭截图后应直接按输入空闲判断为空闲() {
-        assert!(should_confirm_idle(true, false, false));
-        assert!(!should_confirm_idle(false, false, true));
+        assert!(should_confirm_idle(true, 5 * 60, false, false));
+        assert!(!should_confirm_idle(false, 0, false, true));
     }
 
     #[test]
     fn 开启截图后仍应依赖截图确认空闲() {
-        assert!(!should_confirm_idle(true, true, false));
-        assert!(should_confirm_idle(true, true, true));
+        assert!(!should_confirm_idle(true, 5 * 60, true, false));
+        assert!(should_confirm_idle(true, 5 * 60, true, true));
+    }
+
+    #[test]
+    fn 长时间无输入时应强制停止累计活跃时长() {
+        assert!(should_confirm_idle(true, 20 * 60, true, false));
+        assert!(!should_confirm_idle(true, 19 * 60, true, false));
+        assert!(should_confirm_idle(true, 25 * 60, true, false));
+    }
+
+    #[test]
+    fn 已进入输入空闲后切换应用不应回补上一应用时长() {
+        assert_eq!(previous_app_backfill_duration(true, 3600, true, false), 0);
+        assert_eq!(previous_app_backfill_duration(true, 3600, false, true), 0);
+        assert_eq!(previous_app_backfill_duration(true, 3600, false, false), 3600);
+        assert_eq!(previous_app_backfill_duration(false, 3600, false, false), 0);
     }
 
     #[test]

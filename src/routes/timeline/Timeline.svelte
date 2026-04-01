@@ -17,6 +17,7 @@
   import { resolveAppIconSrc } from '../../lib/utils/appVisuals.js';
   import { formatBrowserUrlForDisplay } from '../../lib/utils/browserUrl.js';
   import { prepareTimelineActivities, upsertTimelineActivity } from './timelineData.js';
+  import LocalizedDatePicker from '../../lib/components/LocalizedDatePicker.svelte';
 
   // 获取本地日期（避免 UTC 时区问题）
   function getLocalDateString() {
@@ -467,11 +468,10 @@
     </div>
     <div class="page-toolbar">
       {#key `timeline-date-${currentLocale}`}
-        <input
-          type="date"
+        <LocalizedDatePicker
           bind:value={selectedDate}
-          lang={currentLocale}
-          class="page-control-input"
+          localeCode={currentLocale}
+          triggerClass="page-control-input w-auto"
         />
       {/key}
       <button class="page-control-btn-icon" on:click={loadTimeline} title={t('timeline.refreshTitle')}>

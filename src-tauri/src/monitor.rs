@@ -1312,7 +1312,8 @@ fn extract_url_from_title(window_title: &str) -> Option<String> {
 mod tests {
     #[cfg(target_os = "macos")]
     use super::{
-        best_browser_url_candidate_from_output, browser_url_system_events_process_name_macos,
+        best_browser_url_candidate_from_output, browser_url_script_macos,
+        browser_url_system_events_process_name_macos,
         browser_url_ui_script_macos,
     };
     use super::{
@@ -1458,6 +1459,32 @@ mod tests {
             "脚本编译失败: {}",
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn 直接_applescript_浏览器脚本应先检查应用是否仍在运行() {
+        let cases = [
+            ("google chrome", "Google Chrome"),
+            ("safari", "Safari"),
+            ("edge", "Microsoft Edge"),
+            ("arc", "Arc"),
+            ("brave", "Brave Browser"),
+            ("opera", "Opera"),
+            ("vivaldi", "Vivaldi"),
+            ("chromium", "Chromium"),
+            ("orion", "Orion"),
+            ("sidekick", "Sidekick"),
+        ];
+
+        for (app_lower, app_name) in cases {
+            let (script, _) =
+                browser_url_script_macos(app_lower).expect("应返回浏览器脚本");
+            assert!(
+                script.contains(&format!(r#"if application "{app_name}" is running then"#)),
+                "{app_name} 脚本缺少运行态守卫"
+            );
+        }
     }
 
     #[cfg(target_os = "macos")]
@@ -1973,123 +2000,145 @@ fn normalize_electron_app_name(process_name: &str, window_title: &str) -> String
 /// 获取浏览器当前 URL (macOS)
 /// 使用 window 1 获取最前面窗口的活动标签页 URL
 #[cfg(target_os = "macos")]
-fn browser_url_script_macos(app_lower: &str) -> Option<(&'static str, &'static str)> {
+fn build_running_guarded_browser_script_macos(app_name: &str, inner: &str) -> String {
+    format!(
+        "if application \"{app_name}\" is running then\n    tell application \"{app_name}\"\n{inner}\n    end tell\nelse\n    return \"\"\nend if",
+        app_name = app_name,
+        inner = inner
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn browser_url_script_macos(app_lower: &str) -> Option<(String, &'static str)> {
     if app_lower.contains("chrome") || app_lower.contains("google chrome") {
         // Chrome: 使用 front window 获取最近激活的窗口
         Some((
-            r#"tell application "Google Chrome"
-    if (count of windows) > 0 then
-        return URL of active tab of front window
-    else
-        return ""
-    end if
-end tell"#,
+            build_running_guarded_browser_script_macos(
+                "Google Chrome",
+                r#"        if (count of windows) > 0 then
+            return URL of active tab of front window
+        else
+            return ""
+        end if"#,
+            ),
             "Chrome",
         ))
     } else if app_lower.contains("safari") {
         Some((
-            r#"tell application "Safari"
-    if (count of windows) > 0 then
-        return URL of current tab of front window
-    else
-        return ""
-    end if
-end tell"#,
+            build_running_guarded_browser_script_macos(
+                "Safari",
+                r#"        if (count of windows) > 0 then
+            return URL of current tab of front window
+        else
+            return ""
+        end if"#,
+            ),
             "Safari",
         ))
     } else if app_lower.contains("firefox") {
-        // Firefox 对 AppleScript 支持有限
+        // Firefox 对 AppleScript 支持有限，但仍保持未运行守卫避免意外拉起
         Some((
-            r#"tell application "Firefox" to get URL of front document"#,
+            build_running_guarded_browser_script_macos(
+                "Firefox",
+                r#"        return URL of front document"#,
+            ),
             "Firefox",
         ))
     } else if app_lower.contains("edge") {
         Some((
-            r#"tell application "Microsoft Edge"
-    if (count of windows) > 0 then
-        return URL of active tab of front window
-    else
-        return ""
-    end if
-end tell"#,
+            build_running_guarded_browser_script_macos(
+                "Microsoft Edge",
+                r#"        if (count of windows) > 0 then
+            return URL of active tab of front window
+        else
+            return ""
+        end if"#,
+            ),
             "Edge",
         ))
     } else if app_lower.contains("arc") {
         Some((
-            r#"tell application "Arc"
-    if (count of windows) > 0 then
-        return URL of active tab of front window
-    else
-        return ""
-    end if
-end tell"#,
+            build_running_guarded_browser_script_macos(
+                "Arc",
+                r#"        if (count of windows) > 0 then
+            return URL of active tab of front window
+        else
+            return ""
+        end if"#,
+            ),
             "Arc",
         ))
     } else if app_lower.contains("brave") {
         Some((
-            r#"tell application "Brave Browser"
-    if (count of windows) > 0 then
-        return URL of active tab of front window
-    else
-        return ""
-    end if
-end tell"#,
+            build_running_guarded_browser_script_macos(
+                "Brave Browser",
+                r#"        if (count of windows) > 0 then
+            return URL of active tab of front window
+        else
+            return ""
+        end if"#,
+            ),
             "Brave",
         ))
     } else if app_lower.contains("opera") {
         Some((
-            r#"tell application "Opera"
-    if (count of windows) > 0 then
-        return URL of active tab of front window
-    else
-        return ""
-    end if
-end tell"#,
+            build_running_guarded_browser_script_macos(
+                "Opera",
+                r#"        if (count of windows) > 0 then
+            return URL of active tab of front window
+        else
+            return ""
+        end if"#,
+            ),
             "Opera",
         ))
     } else if app_lower.contains("vivaldi") {
         Some((
-            r#"tell application "Vivaldi"
-    if (count of windows) > 0 then
-        return URL of active tab of front window
-    else
-        return ""
-    end if
-end tell"#,
+            build_running_guarded_browser_script_macos(
+                "Vivaldi",
+                r#"        if (count of windows) > 0 then
+            return URL of active tab of front window
+        else
+            return ""
+        end if"#,
+            ),
             "Vivaldi",
         ))
     } else if app_lower.contains("chromium") {
         Some((
-            r#"tell application "Chromium"
-    if (count of windows) > 0 then
-        return URL of active tab of front window
-    else
-        return ""
-    end if
-end tell"#,
+            build_running_guarded_browser_script_macos(
+                "Chromium",
+                r#"        if (count of windows) > 0 then
+            return URL of active tab of front window
+        else
+            return ""
+        end if"#,
+            ),
             "Chromium",
         ))
     } else if app_lower.contains("orion") {
         Some((
-            r#"tell application "Orion"
-    if (count of documents) > 0 then
-        return URL of front document
-    else
-        return ""
-    end if
-end tell"#,
+            build_running_guarded_browser_script_macos(
+                "Orion",
+                r#"        if (count of documents) > 0 then
+            return URL of front document
+        else
+            return ""
+        end if"#,
+            ),
             "Orion",
         ))
     } else if app_lower.contains("sidekick") {
         // Sidekick 基于 Chromium
         Some((
-            r#"tell application "Sidekick"
-    if (count of windows) > 0 then
-        return URL of active tab of front window
-    else
-        return ""
-    end if
-end tell"#,
+            build_running_guarded_browser_script_macos(
+                "Sidekick",
+                r#"        if (count of windows) > 0 then
+            return URL of active tab of front window
+        else
+            return ""
+        end if"#,
+            ),
             "Sidekick",
         ))
     } else {

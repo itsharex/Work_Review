@@ -7,6 +7,43 @@
 use crate::database::Activity;
 use std::collections::HashMap;
 
+fn calculate_activity_covered_duration(activities: &[Activity]) -> i64 {
+    let mut ranges = activities
+        .iter()
+        .filter_map(|activity| {
+            if activity.duration <= 0 {
+                return None;
+            }
+
+            let start = activity.timestamp.saturating_sub(activity.duration);
+            let end = activity.timestamp;
+            (end > start).then_some((start, end))
+        })
+        .collect::<Vec<_>>();
+
+    if ranges.is_empty() {
+        return 0;
+    }
+
+    ranges.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+
+    let mut total = 0;
+    let mut current_start = ranges[0].0;
+    let mut current_end = ranges[0].1;
+
+    for (start, end) in ranges.into_iter().skip(1) {
+        if start <= current_end {
+            current_end = current_end.max(end);
+        } else {
+            total += current_end - current_start;
+            current_start = start;
+            current_end = end;
+        }
+    }
+
+    total + (current_end - current_start)
+}
+
 /// 小时活动统计
 #[derive(Debug, Clone)]
 pub struct HourlyStats {
@@ -25,7 +62,6 @@ impl HourlyStats {
     /// 从活动列表构建统计
     pub fn from_activities(date: &str, hour: i32, activities: Vec<Activity>) -> Self {
         let mut app_durations: HashMap<String, i64> = HashMap::new();
-        let mut total_duration = 0i64;
         let mut representative_screenshots = Vec::new();
         let mut urls = Vec::new();
         let mut last_app: Option<String> = None;
@@ -36,7 +72,6 @@ impl HourlyStats {
         for activity in &activities {
             // 统计应用时长
             *app_durations.entry(activity.app_name.clone()).or_insert(0) += activity.duration;
-            total_duration += activity.duration;
 
             // 收集浏览器 URL
             if let Some(url) = &activity.browser_url {
@@ -82,6 +117,8 @@ impl HourlyStats {
                 break;
             }
         }
+
+        let total_duration = calculate_activity_covered_duration(&activities);
 
         Self {
             date: date.to_string(),
@@ -200,4 +237,40 @@ pub fn generate_fallback_summary(stats: &HourlyStats) -> String {
     }
 
     summary
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{generate_fallback_summary, HourlyStats};
+    use crate::database::Activity;
+
+    fn sample_activity(app_name: &str, timestamp: i64, duration: i64) -> Activity {
+        Activity {
+            id: None,
+            timestamp,
+            app_name: app_name.to_string(),
+            window_title: format!("{app_name} window"),
+            screenshot_path: String::new(),
+            ocr_text: None,
+            category: "development".to_string(),
+            duration,
+            browser_url: None,
+            executable_path: None,
+            semantic_category: None,
+            semantic_confidence: None,
+        }
+    }
+
+    #[test]
+    fn 小时摘要总时长应按小时内覆盖时长计算而不是重叠累加() {
+        let activities = vec![
+            sample_activity("Chrome", 10 * 3600 + 40 * 60, 40 * 60),
+            sample_activity("WeChat", 10 * 3600 + 55 * 60, 35 * 60),
+        ];
+
+        let stats = HourlyStats::from_activities("2026-04-01", 10, activities);
+
+        assert_eq!(stats.total_duration, 55 * 60);
+        assert!(generate_fallback_summary(&stats).contains("55分钟"));
+    }
 }

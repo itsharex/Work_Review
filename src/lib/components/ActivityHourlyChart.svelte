@@ -4,16 +4,39 @@
   export let data = [];
   export let distributionTitle = '';
   export let distributionSubtitleKey = 'hourlyChart.distributionSubtitle';
+  export let mode = 'column';
+  export let peakHourLabel = '';
+  export let peakDurationLabel = '';
 
   const keyHours = [0, 6, 12, 18, 23];
+  let selectedHour = null;
   $: currentLocale = $locale;
 
   function formatHourLabel(hour) {
     return `${String(hour).padStart(2, '0')}:00`;
   }
 
+  function formatHourRangeLabel(hour) {
+    return `${formatHourLabel(hour)} - ${formatHourLabel((hour + 1) % 24)}`;
+  }
+
   function showHourLabel(hour) {
     return keyHours.includes(hour);
+  }
+
+  function formatAxisTickLabel(seconds) {
+    const minutes = Math.round(seconds / 60);
+    if (minutes === 0) {
+      return '0';
+    }
+    if (minutes % 60 === 0) {
+      return `${minutes / 60}h`;
+    }
+    return `${minutes}m`;
+  }
+
+  function selectHour(hour) {
+    selectedHour = hour;
   }
 
   $: buckets = Array.from({ length: 24 }, (_, hour) => {
@@ -31,18 +54,27 @@
   $: topBuckets = [...activeBuckets]
     .sort((left, right) => right.duration - left.duration || left.hour - right.hour)
     .slice(0, 3);
+  $: selectedBucket = buckets.find((bucket) => bucket.hour === selectedHour) || null;
+  $: axisMax = (() => {
+    const raw = Math.max(maxDuration, 60);
+    const minute = 60;
+    const candidates = [5, 10, 15, 20, 30, 45, 60, 90, 120, 180, 240, 300, 360, 480, 720]
+      .map((value) => value * minute);
+    return candidates.find((candidate) => candidate >= raw) || Math.ceil(raw / 3600) * 3600;
+  })();
+  $: yAxisTicks = [axisMax, Math.round(axisMax * 2 / 3), Math.round(axisMax / 3), 0];
 </script>
 
 <div class="space-y-4" data-locale={currentLocale}>
   <div class="grid grid-cols-2 gap-3 lg:grid-cols-4">
     <div class="min-h-[104px] rounded-2xl border border-slate-100 bg-white p-4 dark:border-slate-700/60 dark:bg-slate-800/80">
-      <p class="text-[13px] font-medium text-slate-400 dark:text-slate-500">{t('hourlyChart.peakHour')}</p>
+      <p class="text-[13px] font-medium text-slate-400 dark:text-slate-500">{peakHourLabel || t('hourlyChart.peakHour')}</p>
       <p class="mt-5 text-[1.8rem] font-semibold tracking-tight text-slate-800 dark:text-white">
         {formatHourLabel(peakBucket.hour)}
       </p>
     </div>
     <div class="min-h-[104px] rounded-2xl border border-slate-100 bg-white p-4 dark:border-slate-700/60 dark:bg-slate-800/80">
-      <p class="text-[13px] font-medium text-slate-400 dark:text-slate-500">{t('hourlyChart.peakDuration')}</p>
+      <p class="text-[13px] font-medium text-slate-400 dark:text-slate-500">{peakDurationLabel || t('hourlyChart.peakDuration')}</p>
       <p class="mt-5 text-[1.8rem] font-semibold tracking-tight text-slate-800 dark:text-white">
         {formatDurationLocalized(peakBucket.duration, { compact: true })}
       </p>
@@ -85,36 +117,94 @@
       {/if}
     </div>
 
-    <div class="relative rounded-2xl bg-slate-50 px-3 pb-3 pt-4 dark:bg-slate-900/40">
-      <div class="pointer-events-none absolute inset-x-3 top-4 bottom-8">
-        <div class="absolute inset-x-0 top-0 border-t border-dashed border-slate-200 dark:border-slate-700/80"></div>
-        <div class="absolute inset-x-0 top-1/2 border-t border-dashed border-slate-200 dark:border-slate-700/80"></div>
-        <div class="absolute inset-x-0 bottom-0 border-t border-dashed border-slate-200 dark:border-slate-700/80"></div>
-      </div>
-
-      <div class="relative flex h-44 items-end gap-1">
+    {#if mode === 'row'}
+      <div class="space-y-2 rounded-2xl bg-slate-50 p-3 dark:bg-slate-900/40">
         {#each buckets as bucket}
-          {@const height = bucket.duration > 0 ? Math.max((bucket.duration / maxDuration) * 100, 6) : 2}
+          {@const width = bucket.duration > 0 ? Math.max((bucket.duration / maxDuration) * 100, 3) : 1}
           {@const isPeak = bucket.duration > 0 && bucket.hour === peakBucket.hour}
-          <div class="flex h-full min-w-0 flex-1 flex-col justify-end">
-            <div
-              class={`w-full rounded-t-[10px] transition-all duration-300 ${isPeak ? 'bg-sky-500 dark:bg-sky-400' : 'bg-slate-300 dark:bg-slate-600'}`}
-              style={`height: ${height}%; opacity: ${bucket.duration > 0 ? 1 : 0.35};`}
-              title={`${formatHourLabel(bucket.hour)} · ${formatDurationLocalized(bucket.duration)}`}
-            ></div>
-          </div>
+          <button
+            type="button"
+            class={`grid w-full grid-cols-[3.25rem_minmax(0,1fr)_4.75rem] items-center gap-2 rounded-xl px-1.5 py-1 text-left transition-colors duration-200 ${selectedHour === bucket.hour ? 'bg-sky-50 dark:bg-sky-500/10' : 'hover:bg-white/70 dark:hover:bg-slate-800/60'}`}
+            aria-pressed={selectedHour === bucket.hour}
+            on:click={() => selectHour(bucket.hour)}
+          >
+            <span class="text-[11px] font-medium text-slate-500 dark:text-slate-400">{formatHourLabel(bucket.hour)}</span>
+            <div class="h-3 overflow-hidden rounded-full bg-slate-200 dark:bg-slate-700/60">
+              <div
+                class={`h-full rounded-full transition-all duration-300 ${isPeak ? 'bg-sky-500 dark:bg-sky-400' : 'bg-slate-400 dark:bg-slate-500'}`}
+                style={`width: ${width}%; opacity: ${bucket.duration > 0 ? 1 : 0.35};`}
+                title={`${formatHourLabel(bucket.hour)} · ${formatDurationLocalized(bucket.duration)}`}
+              ></div>
+            </div>
+            <span class="text-right text-[11px] font-medium tabular-nums text-slate-500 dark:text-slate-400">{formatDurationLocalized(bucket.duration, { compact: true })}</span>
+          </button>
         {/each}
       </div>
+    {:else}
+      <div class="rounded-2xl bg-slate-50 px-3 pb-3 pt-4 dark:bg-slate-900/40">
+        <div class="grid grid-cols-[2.9rem_minmax(0,1fr)] gap-2">
+          <div class="relative h-44">
+            {#each yAxisTicks as tick, index}
+              <div class="absolute inset-x-0 flex -translate-y-1/2 items-center justify-end text-[10px] font-medium text-slate-400 dark:text-slate-500" style={`top: ${(index / 3) * 100}%`}>
+                <span class="whitespace-nowrap">{formatAxisTickLabel(tick)}</span>
+              </div>
+            {/each}
+          </div>
+          <div class="relative">
+            <div class="pointer-events-none absolute inset-x-0 top-0 bottom-8">
+              <div class="absolute inset-x-0 top-0 border-t border-dashed border-slate-200 dark:border-slate-700/80"></div>
+              <div class="absolute inset-x-0 top-1/3 border-t border-dashed border-slate-200 dark:border-slate-700/80"></div>
+              <div class="absolute inset-x-0 top-2/3 border-t border-dashed border-slate-200 dark:border-slate-700/80"></div>
+              <div class="absolute inset-x-0 bottom-0 border-t border-dashed border-slate-200 dark:border-slate-700/80"></div>
+            </div>
 
-      <div class="mt-3 flex gap-1">
-        {#each buckets as bucket}
-          <div class="flex-1 text-center">
-            <span class={`text-[10px] font-medium ${showHourLabel(bucket.hour) ? 'text-slate-400 dark:text-slate-500' : 'text-transparent'}`}>
-              {showHourLabel(bucket.hour) ? formatHourLabel(bucket.hour) : '.'}
-            </span>
+            <div class="relative flex h-44 items-end gap-1">
+              {#each buckets as bucket}
+                {@const height = bucket.duration > 0 ? Math.max((bucket.duration / axisMax) * 100, 6) : 2}
+                {@const isPeak = bucket.duration > 0 && bucket.hour === peakBucket.hour}
+                <div class="flex h-full min-w-0 flex-1 flex-col justify-end">
+                  <button
+                    type="button"
+                    class={`w-full rounded-t-[10px] transition-all duration-300 focus:outline-none focus:ring-2 focus:ring-sky-300 dark:focus:ring-sky-500 ${selectedHour === bucket.hour ? 'ring-2 ring-sky-300 dark:ring-sky-500' : ''} ${isPeak ? 'bg-sky-500 dark:bg-sky-400' : 'bg-slate-300 dark:bg-slate-600'}`}
+                    style={`height: ${height}%; opacity: ${bucket.duration > 0 ? 1 : 0.35};`}
+                    title={`${formatHourLabel(bucket.hour)} · ${formatDurationLocalized(bucket.duration)}`}
+                    aria-pressed={selectedHour === bucket.hour}
+                    on:click={() => selectHour(bucket.hour)}
+                  ></button>
+                </div>
+              {/each}
+            </div>
+
+            <div class="mt-3 flex gap-1">
+              {#each buckets as bucket}
+                <div class="flex-1 text-center">
+                  <span class={`text-[10px] font-medium ${showHourLabel(bucket.hour) ? 'text-slate-400 dark:text-slate-500' : 'text-transparent'}`}>
+                    {showHourLabel(bucket.hour) ? formatHourLabel(bucket.hour) : '.'}
+                  </span>
+                </div>
+              {/each}
+            </div>
           </div>
-        {/each}
+        </div>
       </div>
+    {/if}
+
+    <div class="mt-4 rounded-2xl border border-slate-100 bg-slate-50 px-4 py-3 dark:border-slate-700/60 dark:bg-slate-900/40">
+      <p class="text-[12px] font-medium text-slate-400 dark:text-slate-500">
+        {t('hourlyChart.selectedHour')}
+      </p>
+      {#if selectedBucket}
+        <p class="mt-2 text-sm font-semibold text-slate-700 dark:text-slate-200">
+          {formatHourRangeLabel(selectedBucket.hour)}
+        </p>
+        <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">
+          {formatDurationLocalized(selectedBucket.duration)}
+        </p>
+      {:else}
+        <p class="mt-2 text-xs text-slate-500 dark:text-slate-400">
+          {t('hourlyChart.selectedHourHint')}
+        </p>
+      {/if}
     </div>
   </div>
 </div>

@@ -33,18 +33,69 @@
   }
 
   function getDateRangeLabel(dateFrom, dateTo) {
-    if (dateFrom === dateTo) {
-      return formatLocalizedDate(parseDateString(dateFrom), { month: 'long', day: 'numeric', weekday: 'short' });
+    if (!dateFrom && !dateTo) {
+      return '';
     }
-    return `${formatLocalizedDate(parseDateString(dateFrom), { month: 'short', day: 'numeric' })} - ${formatLocalizedDate(parseDateString(dateTo), { month: 'short', day: 'numeric' })}`;
+    if (dateFrom && !dateTo) {
+      return formatLocalizedDate(parseDateString(dateFrom), {
+        year: 'numeric',
+        month: 'long',
+        day: 'numeric',
+        weekday: 'short',
+      });
+    }
+    if (!dateFrom && dateTo) {
+      return formatLocalizedDate(parseDateString(dateTo), {
+        year: 'numeric',
+        month: 'long',
+        day: 'numeric',
+        weekday: 'short',
+      });
+    }
+    if (dateFrom === dateTo) {
+      return formatLocalizedDate(parseDateString(dateFrom), {
+        year: 'numeric',
+        month: 'long',
+        day: 'numeric',
+        weekday: 'short',
+      });
+    }
+    return `${formatLocalizedDate(parseDateString(dateFrom), { year: 'numeric', month: 'short', day: 'numeric' })} - ${formatLocalizedDate(parseDateString(dateTo), { year: 'numeric', month: 'short', day: 'numeric' })}`;
   }
 
   function getWeekRangeLabel(dateValue) {
     const anchor = parseDateString(dateValue);
     const monday = new Date(anchor);
     monday.setDate(anchor.getDate() - ((anchor.getDay() + 6) % 7));
-    return `${formatLocalizedDate(monday, { month: 'short', day: 'numeric' })} - ${formatLocalizedDate(anchor, { month: 'short', day: 'numeric' })}`;
+    return `${formatLocalizedDate(monday, { year: 'numeric', month: 'short', day: 'numeric' })} - ${formatLocalizedDate(anchor, { year: 'numeric', month: 'short', day: 'numeric' })}`;
   }
+
+  function formatOverviewDateInput(dateValue) {
+    return dateValue ? dateValue.replace(/-/g, '/') : '';
+  }
+
+  function parseOverviewDateInput(value) {
+    const normalized = value.trim().replace(/[.]/g, '-').replace(/[\/]/g, '-');
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(normalized)) {
+      return null;
+    }
+
+    const parsed = parseDateString(normalized);
+    return Number.isNaN(parsed.getTime()) ? null : normalized;
+  }
+
+  function formatIsoDate(date) {
+    return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+  }
+
+  function shiftIsoDate(dateValue, offsetDays) {
+    const next = parseDateString(dateValue);
+    next.setDate(next.getDate() + offsetDays);
+    return formatIsoDate(next);
+  }
+
+  const APP_USAGE_VIEW_MODE_KEY = 'overview.appUsage.viewMode';
+  const HOURLY_ACTIVITY_VIEW_MODE_KEY = 'overview.hourlyActivity.viewMode';
 
   let stats = null;
   let loading = true;
@@ -61,6 +112,13 @@
   let overviewRefreshPromise = null;
   let overviewRequestId = 0;
   let lastCheckDate = currentTime.getDate();
+  let appUsageViewMode = 'row';
+  let hourlyActivityViewMode = 'column';
+  let overviewViewModeReady = false;
+  let overviewDateInputFrom = formatOverviewDateInput(selectedDateFrom);
+  let overviewDateInputTo = formatOverviewDateInput(selectedDateTo);
+  let editingOverviewDateFrom = false;
+  let editingOverviewDateTo = false;
   
   let expandedDomains = new Set();
   let editingDomainKey = null;
@@ -90,7 +148,7 @@
     ? getDateRangeLabel(selectedDateFrom, selectedDateTo)
     : overviewMode === 'week'
       ? `${t('overview.modeWeek')} · ${getWeekRangeLabel(getLocalDateString())}`
-      : formatLocalizedDate(new Date(), { month: 'long', day: 'numeric', weekday: 'short' });
+      : formatLocalizedDate(new Date(), { year: 'numeric', month: 'long', day: 'numeric', weekday: 'short' });
   $: overviewStatusLabel = overviewMode === 'today' ? t('overview.live') : t(`overview.${overviewMode === 'date' ? 'modeDate' : 'modeWeek'}`);
   $: overviewIsLive = overviewMode !== 'date';
   $: overviewTotalActivityTitle = overviewMode === 'week'
@@ -103,16 +161,65 @@
     : overviewMode === 'date'
       ? t(isSingleSelectedDate ? 'overview.workDurationDate' : 'overview.workDurationRange')
       : t('overview.workDurationToday');
+  $: appUsageViewModeLabel = appUsageViewMode === 'column' ? t('overview.appUsageColumn') : t('overview.appUsageBar');
+  $: hourlyActivityViewModeLabel = hourlyActivityViewMode === 'row' ? t('overview.hourlyActivityBar') : t('overview.hourlyActivityColumn');
+  $: hourlyChartPeakHourLabel = overviewMode === 'week'
+    ? t('hourlyChart.peakHourRange')
+    : overviewMode === 'date'
+      ? t(isSingleSelectedDate ? 'hourlyChart.peakHour' : 'hourlyChart.peakHourRange')
+      : t('hourlyChart.peakHour');
+  $: hourlyChartPeakDurationLabel = overviewMode === 'week'
+    ? t('hourlyChart.peakDurationRange')
+    : overviewMode === 'date'
+      ? t(isSingleSelectedDate ? 'hourlyChart.peakDuration' : 'hourlyChart.peakDurationRange')
+      : t('hourlyChart.peakDuration');
   $: hourlyChartDistributionTitle = overviewMode === 'week'
     ? t('hourlyChart.distributionTitleWeek')
     : overviewMode === 'date'
       ? t(isSingleSelectedDate ? 'hourlyChart.distributionTitleDate' : 'hourlyChart.distributionTitleRange')
       : t('hourlyChart.distributionTitleToday');
-  $: hourlyChartDistributionSubtitleKey = 'hourlyChart.distributionSubtitle';
+  $: hourlyChartDistributionSubtitleKey = overviewMode === 'week'
+    ? 'hourlyChart.distributionSubtitleRange'
+    : overviewMode === 'date'
+      ? (isSingleSelectedDate ? 'hourlyChart.distributionSubtitle' : 'hourlyChart.distributionSubtitleRange')
+      : 'hourlyChart.distributionSubtitle';
+  $: overviewNoWebsiteVisitsText = overviewMode === 'week'
+    ? t('overview.noWebsiteVisitsWeek')
+    : overviewMode === 'date'
+      ? t(isSingleSelectedDate ? 'overview.noWebsiteVisitsDate' : 'overview.noWebsiteVisitsRange')
+      : t('overview.noWebsiteVisitsToday');
+  $: overviewNoAppStatsText = overviewMode === 'week'
+    ? t('overview.noAppStatsWeek')
+    : overviewMode === 'date'
+      ? t(isSingleSelectedDate ? 'overview.noAppStatsDate' : 'overview.noAppStatsRange')
+      : t('overview.noAppStatsToday');
+  $: if (!editingOverviewDateFrom && overviewDateInputFrom !== formatOverviewDateInput(selectedDateFrom)) {
+    overviewDateInputFrom = formatOverviewDateInput(selectedDateFrom);
+  }
+  $: if (!editingOverviewDateTo && overviewDateInputTo !== formatOverviewDateInput(selectedDateTo)) {
+    overviewDateInputTo = formatOverviewDateInput(selectedDateTo);
+  }
   
   // 订阅全局图标缓存 store
   let appIcons = {};
   const unsubIcons = appIconStore.subscribe(v => appIcons = v);
+
+  function readStoredOverviewViewMode(key, fallback) {
+    try {
+      const value = window.localStorage.getItem(key);
+      return value || fallback;
+    } catch {
+      return fallback;
+    }
+  }
+
+  function persistOverviewViewMode(key, value) {
+    try {
+      window.localStorage.setItem(key, value);
+    } catch {
+      // ignore persistence errors
+    }
+  }
 
   // 响应式图标加载：stats 变化时自动触发
   $: if (stats) {
@@ -189,7 +296,9 @@
   }
 
   function setOverviewMode(mode) {
-    if (overviewMode === mode) return;
+    if (overviewMode === mode) {
+      return;
+    }
     overviewMode = mode;
     if (mode === 'date') {
       selectedDateFrom = getLocalDateString();
@@ -208,9 +317,47 @@
 
   function handleOverviewDateChange() {
     normalizeSelectedDateRange();
+    overviewDateInputFrom = formatOverviewDateInput(selectedDateFrom);
+    overviewDateInputTo = formatOverviewDateInput(selectedDateTo);
     selectedBrowser = null;
     cancelDomainSemanticEdit();
     loadStats(true);
+  }
+
+  function commitOverviewDateInput(field) {
+    const nextValue = field === 'start' ? overviewDateInputFrom : overviewDateInputTo;
+    const parsed = parseOverviewDateInput(nextValue);
+
+    if (!parsed) {
+      overviewDateInputFrom = formatOverviewDateInput(selectedDateFrom);
+      overviewDateInputTo = formatOverviewDateInput(selectedDateTo);
+      return;
+    }
+
+    if (field === 'start') {
+      selectedDateFrom = parsed;
+      editingOverviewDateFrom = false;
+    } else {
+      selectedDateTo = parsed;
+      editingOverviewDateTo = false;
+    }
+
+    handleOverviewDateChange();
+  }
+
+  function stepOverviewDateBoundary(field, offsetDays) {
+    const today = getLocalDateString();
+
+    if (field === 'start') {
+      const nextStart = shiftIsoDate(selectedDateFrom, offsetDays);
+      selectedDateFrom = nextStart > selectedDateTo ? selectedDateTo : nextStart;
+    } else {
+      const nextEnd = shiftIsoDate(selectedDateTo, offsetDays);
+      const clampedEnd = nextEnd > today ? today : nextEnd;
+      selectedDateTo = clampedEnd < selectedDateFrom ? selectedDateFrom : clampedEnd;
+    }
+
+    handleOverviewDateChange();
   }
 
   async function saveDomainSemanticRule(domain) {
@@ -337,6 +484,9 @@
   }
 
   onMount(async () => {
+    appUsageViewMode = readStoredOverviewViewMode(APP_USAGE_VIEW_MODE_KEY, 'row');
+    hourlyActivityViewMode = readStoredOverviewViewMode(HOURLY_ACTIVITY_VIEW_MODE_KEY, 'column');
+    overviewViewModeReady = true;
     loadStats();
     if (!document.hidden) {
       clockInterval = setInterval(() => { 
@@ -404,6 +554,14 @@
     window.addEventListener('activity-added', handleActivityAdded);
   });
 
+  $: if (overviewViewModeReady) {
+    persistOverviewViewMode(APP_USAGE_VIEW_MODE_KEY, appUsageViewMode);
+  }
+
+  $: if (overviewViewModeReady) {
+    persistOverviewViewMode(HOURLY_ACTIVITY_VIEW_MODE_KEY, hourlyActivityViewMode);
+  }
+
   onDestroy(() => {
     if (unlisten) unlisten();
     if (clockInterval) clearInterval(clockInterval);
@@ -463,30 +621,63 @@
     </button>
 
     {#if overviewMode === 'date'}
-      {#key `overview-date-${currentLocale}`}
-        <div class="flex flex-wrap items-center gap-2">
+      <div class="overview-date-bar">
+        <button
+          type="button"
+          class="page-control-btn-icon"
+          title={t('common.previous')}
+          on:click={() => stepOverviewDateBoundary('start', -1)}
+        >
+          <svg class="h-4 w-4 text-slate-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M15 19l-7-7 7-7" />
+          </svg>
+        </button>
+
+        <div class="overview-date-field">
+          <span class="overview-date-label">{t('overview.rangeStart')}</span>
           <input
-            type="date"
-            bind:value={selectedDateFrom}
-            max={getLocalDateString()}
-            lang={currentLocale}
-            aria-label={t('overview.rangeStart')}
-            class="page-control-input w-auto shrink-0"
-            on:change={handleOverviewDateChange}
-          />
-          <span class="text-xs text-slate-400 dark:text-slate-500">-</span>
-          <input
-            type="date"
-            bind:value={selectedDateTo}
-            min={selectedDateFrom}
-            max={getLocalDateString()}
-            lang={currentLocale}
-            aria-label={t('overview.rangeEnd')}
-            class="page-control-input w-auto shrink-0"
-            on:change={handleOverviewDateChange}
+            type="text"
+            bind:value={overviewDateInputFrom}
+            class="overview-date-input"
+            inputmode="numeric"
+            placeholder="YYYY/MM/DD"
+            spellcheck="false"
+            autocomplete="off"
+            on:focus={() => { editingOverviewDateFrom = true; }}
+            on:blur={() => commitOverviewDateInput('start')}
+            on:keydown={(event) => event.key === 'Enter' && commitOverviewDateInput('start')}
           />
         </div>
-      {/key}
+
+        <span class="overview-date-separator">-</span>
+
+        <div class="overview-date-field">
+          <span class="overview-date-label">{t('overview.rangeEnd')}</span>
+          <input
+            type="text"
+            bind:value={overviewDateInputTo}
+            class="overview-date-input"
+            inputmode="numeric"
+            placeholder="YYYY/MM/DD"
+            spellcheck="false"
+            autocomplete="off"
+            on:focus={() => { editingOverviewDateTo = true; }}
+            on:blur={() => commitOverviewDateInput('end')}
+            on:keydown={(event) => event.key === 'Enter' && commitOverviewDateInput('end')}
+          />
+        </div>
+
+        <button
+          type="button"
+          class="page-control-btn-icon"
+          title={t('common.next')}
+          on:click={() => stepOverviewDateBoundary('end', 1)}
+        >
+          <svg class="h-4 w-4 text-slate-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M9 5l7 7-7 7" />
+          </svg>
+        </button>
+      </div>
     {/if}
   </div>
 
@@ -572,14 +763,34 @@
         <div class="empty-state-icon !w-12 !h-12 !mb-3 shadow-none">
           <span class="text-xl">🌐</span>
         </div>
-        <p class="empty-state-copy">{t('overview.noWebsiteVisits')}</p>
+        <p class="empty-state-copy">{overviewNoWebsiteVisitsText}</p>
       </div>
     {/if}
   </div>
 
   <!-- 应用使用：始终渲染 -->
   <div class="page-card mb-4">
-    <h3 class="page-section-title">{t('overview.appUsage')}</h3>
+    <div class="mb-3 flex items-center justify-between gap-3">
+      <h3 class="page-section-title !mb-0">{t('overview.appUsage')}</h3>
+      <button
+        type="button"
+        class="page-control-btn-icon"
+        title={appUsageViewModeLabel}
+        on:click={() => {
+          appUsageViewMode = appUsageViewMode === 'row' ? 'column' : 'row';
+        }}
+      >
+        {#if appUsageViewMode === 'row'}
+          <svg class="h-4 w-4 text-slate-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M4 7h16M4 12h12M4 17h8" />
+          </svg>
+        {:else}
+          <svg class="h-4 w-4 text-slate-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M6 18V9m6 9V6m6 12v-4" />
+          </svg>
+        {/if}
+      </button>
+    </div>
     {#if loading || !stats}
       <div class="animate-pulse">
         {#each [1,2,3,4] as _}
@@ -591,19 +802,39 @@
         {/each}
       </div>
     {:else if stats.app_usage.length > 0}
-      <AppUsageChart data={stats.app_usage} />
+      <AppUsageChart data={stats.app_usage} mode={appUsageViewMode} />
     {:else}
       <div class="empty-state-compact">
         <div class="empty-state-icon !w-12 !h-12 !mb-3 shadow-none">
           <span class="text-xl">📊</span>
         </div>
-        <p class="empty-state-copy">{t('overview.noAppStats')}</p>
+        <p class="empty-state-copy">{overviewNoAppStatsText}</p>
       </div>
     {/if}
   </div>
 
   <div class="page-card mb-4">
-    <h3 class="page-section-title">{t('overview.hourlyActivity')}</h3>
+    <div class="mb-3 flex items-center justify-between gap-3">
+      <h3 class="page-section-title !mb-0">{t('overview.hourlyActivity')}</h3>
+      <button
+        type="button"
+        class="page-control-btn-icon"
+        title={hourlyActivityViewModeLabel}
+        on:click={() => {
+          hourlyActivityViewMode = hourlyActivityViewMode === 'column' ? 'row' : 'column';
+        }}
+      >
+        {#if hourlyActivityViewMode === 'column'}
+          <svg class="h-4 w-4 text-slate-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M6 18V9m6 9V6m6 12v-4" />
+          </svg>
+        {:else}
+          <svg class="h-4 w-4 text-slate-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M4 7h16M4 12h12M4 17h8" />
+          </svg>
+        {/if}
+      </button>
+    </div>
     {#if loading || !stats}
       <div class="animate-pulse rounded-2xl bg-white dark:bg-slate-800/60">
         <div class="mb-4 grid grid-cols-2 gap-3 lg:grid-cols-4">
@@ -631,8 +862,11 @@
     {:else}
       <ActivityHourlyChart
         data={stats.hourly_activity_distribution}
+        peakHourLabel={hourlyChartPeakHourLabel}
+        peakDurationLabel={hourlyChartPeakDurationLabel}
         distributionTitle={hourlyChartDistributionTitle}
         distributionSubtitleKey={hourlyChartDistributionSubtitleKey}
+        mode={hourlyActivityViewMode}
       />
     {/if}
   </div>

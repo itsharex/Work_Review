@@ -8,6 +8,7 @@
   import { cache } from '../../lib/stores/cache.js';
   import { formatLocalizedDate, formatLocalizedTime, locale, t } from '$lib/i18n/index.js';
   import { shouldShowPromptAppliedToast } from './reportPromptFeedback.js';
+  import LocalizedDatePicker from '../../lib/components/LocalizedDatePicker.svelte';
 
   function getLocalDateString() {
     const now = new Date();
@@ -333,12 +334,11 @@
           {t('report.yesterday')}
         </button>
         {#key `report-date-${currentLocale}`}
-          <input
-            type="date"
-            max={getLocalDateString()}
+          <LocalizedDatePicker
             bind:value={selectedDate}
-            lang={currentLocale}
-            class="page-control-input"
+            max={getLocalDateString()}
+            localeCode={currentLocale}
+            triggerClass="page-control-input w-auto"
           />
         {/key}
       </div>

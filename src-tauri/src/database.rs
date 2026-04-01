@@ -253,6 +253,30 @@ fn calculate_work_time_overlap_duration(
     }
 }
 
+fn calculate_covered_duration(mut ranges: Vec<(i64, i64)>) -> i64 {
+    if ranges.is_empty() {
+        return 0;
+    }
+
+    ranges.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+
+    let mut total = 0;
+    let mut current_start = ranges[0].0;
+    let mut current_end = ranges[0].1;
+
+    for (start, end) in ranges.into_iter().skip(1) {
+        if start <= current_end {
+            current_end = current_end.max(end);
+        } else {
+            total += current_end - current_start;
+            current_start = start;
+            current_end = end;
+        }
+    }
+
+    total + (current_end - current_start)
+}
+
 fn tokenize_memory_query(query: &str) -> Vec<String> {
     query
         .split_whitespace()
@@ -1060,6 +1084,7 @@ impl Database {
         let mut hourly_activity_distribution: Vec<HourlyActivityBucket> = (0..24)
             .map(|hour| HourlyActivityBucket { hour, duration: 0 })
             .collect();
+        let mut hourly_activity_ranges: Vec<Vec<(i64, i64)>> = (0..24).map(|_| Vec::new()).collect();
         let mut domain_semantic_map: std::collections::HashMap<
             String,
             std::collections::HashMap<String, i64>,
@@ -1107,7 +1132,10 @@ impl Database {
                         (overlap_end.min(hour_end_ts) - overlap_start.max(hour_start_ts)).max(0);
 
                     if hour_duration > 0 {
-                        hourly_activity_distribution[hour].duration += hour_duration;
+                        hourly_activity_ranges[hour].push((
+                            overlap_start.max(hour_start_ts),
+                            overlap_end.min(hour_end_ts),
+                        ));
                     }
                 }
             }
@@ -1202,6 +1230,9 @@ impl Database {
             .into_values()
             .map(|(usage, _)| usage)
             .collect();
+        for (hour, ranges) in hourly_activity_ranges.into_iter().enumerate() {
+            hourly_activity_distribution[hour].duration = calculate_covered_duration(ranges);
+        }
         app_usage.sort_by(|a, b| {
             b.duration
                 .cmp(&a.duration)
@@ -2373,6 +2404,56 @@ mod tests {
                     bucket.duration == 0
                 }
             }));
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[test]
+    fn 今日统计的单小时活跃度不应因重叠活动而超过真实覆盖时长() {
+        let db_path = temp_db_path("daily-stats-hourly-overlap");
+        let db = Database::new(&db_path).expect("创建测试数据库失败");
+        let date = "2026-03-27";
+
+        let records = vec![
+            Activity {
+                id: None,
+                timestamp: local_ts(date, 10, 40),
+                app_name: "Chrome".to_string(),
+                window_title: "docs".to_string(),
+                screenshot_path: "chrome-a.jpg".to_string(),
+                ocr_text: None,
+                category: "browser".to_string(),
+                duration: 40 * 60,
+                browser_url: Some("https://example.com/docs".to_string()),
+                executable_path: None,
+                semantic_category: Some("资料阅读".to_string()),
+                semantic_confidence: Some(80),
+            },
+            Activity {
+                id: None,
+                timestamp: local_ts(date, 10, 55),
+                app_name: "WeChat".to_string(),
+                window_title: "team".to_string(),
+                screenshot_path: "wechat-a.jpg".to_string(),
+                ocr_text: None,
+                category: "communication".to_string(),
+                duration: 35 * 60,
+                browser_url: None,
+                executable_path: None,
+                semantic_category: Some("即时聊天".to_string()),
+                semantic_confidence: Some(80),
+            },
+        ];
+
+        for activity in &records {
+            db.insert_activity(activity).expect("插入测试数据失败");
+        }
+
+        let stats = db
+            .get_daily_stats_with_work_time(date, 9, 18, 0, 0)
+            .expect("读取今日统计失败");
+
+        assert_eq!(stats.hourly_activity_distribution[10].duration, 55 * 60);
 
         let _ = std::fs::remove_file(db_path);
     }
