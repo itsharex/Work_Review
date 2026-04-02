@@ -1320,7 +1320,8 @@ mod tests {
         categorize_app, categorize_app_with_rules, decode_mozlz4_bytes,
         extract_active_tab_url_from_session_store_value, extract_url_from_title,
         firefox_family_profile_dir_from_ini, is_browser_app, is_probable_domain,
-        normalize_possible_url, remember_browser_url_log,
+        normalize_macos_frontmost_app_name, normalize_possible_url,
+        remember_browser_url_log,
     };
     use std::collections::HashMap;
     use std::path::Path;
@@ -1417,6 +1418,41 @@ mod tests {
         assert_eq!(extract_url_from_title("版本 1.2.3 - Google Chrome"), None);
         assert!(is_probable_domain("sub.example.com"));
         assert!(!is_probable_domain("1.2.3"));
+    }
+
+    #[test]
+    fn 通用_electron_进程名应优先使用应用路径还原真实名称() {
+        assert_eq!(
+            normalize_macos_frontmost_app_name(
+                "Electron",
+                "欢迎使用",
+                Some("com.trae.app"),
+                Some("/Applications/Trae.app"),
+            ),
+            "Trae"
+        );
+        assert_eq!(
+            normalize_macos_frontmost_app_name(
+                "Electron Helper",
+                "",
+                Some("com.trae.cn"),
+                Some("/Applications/Trae CN.app"),
+            ),
+            "Trae CN"
+        );
+    }
+
+    #[test]
+    fn 通用_electron_进程名应在缺少路径时回退到_bundle_id() {
+        assert_eq!(
+            normalize_macos_frontmost_app_name(
+                "Electron",
+                "",
+                Some("com.bytedance.doubao.browser"),
+                None,
+            ),
+            "Doubao Browser"
+        );
     }
 
     #[cfg(target_os = "macos")]
@@ -1686,11 +1722,20 @@ fn get_active_window_with_options(include_browser_url: bool) -> Result<ActiveWin
         tell application "System Events"
             set frontApp to first application process whose frontmost is true
             set appName to name of frontApp
+            set bundleId to ""
+            set appPath to ""
             set windowTitle to ""
+            set sep to character id 31
+            try
+                set bundleId to bundle identifier of frontApp
+            end try
+            try
+                set appPath to POSIX path of (file of frontApp as alias)
+            end try
             try
                 set windowTitle to name of front window of frontApp
             end try
-            return appName & "|" & windowTitle
+            return appName & sep & bundleId & sep & appPath & sep & windowTitle
         end tell
     "#;
 
@@ -1702,14 +1747,27 @@ fn get_active_window_with_options(include_browser_url: bool) -> Result<ActiveWin
 
     if output.status.success() {
         let result = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        let parts: Vec<&str> = result.splitn(2, '|').collect();
+        let parts: Vec<&str> = result.split('\u{1f}').collect();
 
-        let raw_app_name = parts.first().unwrap_or(&"Unknown").to_string();
-        let window_title = parts.get(1).unwrap_or(&"").to_string();
+        let raw_app_name = parts.first().copied().unwrap_or("Unknown").to_string();
+        let bundle_identifier = parts
+            .get(1)
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty());
+        let app_path = parts
+            .get(2)
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty());
+        let window_title = parts.get(3).copied().unwrap_or("").to_string();
         let window_bounds = find_frontmost_window_bounds(&raw_app_name, &window_title);
 
-        // 对 Electron 类应用进行名称规范化
-        let app_name = normalize_electron_app_name(&raw_app_name, &window_title);
+        // 对 Electron / Helper 类通用进程做名称还原，优先使用 app path / bundle id。
+        let app_name = normalize_macos_frontmost_app_name(
+            &raw_app_name,
+            &window_title,
+            bundle_identifier,
+            app_path,
+        );
 
         // 如果是浏览器，尝试获取 URL
         let browser_url = if include_browser_url {
@@ -1722,7 +1780,7 @@ fn get_active_window_with_options(include_browser_url: bool) -> Result<ActiveWin
             app_name,
             window_title,
             browser_url,
-            executable_path: None,
+            executable_path: app_path.map(str::to_string),
             window_bounds,
         })
     } else {
@@ -1873,7 +1931,6 @@ fn find_frontmost_window_bounds(owner_name: &str, window_title: &str) -> Option<
 /// 规范化 Electron 应用名称
 /// 对于一些基于 Electron 的应用，进程名可能是 Electron 或 xxxx Helper
 /// 需要根据窗口标题或其他特征识别真实应用名
-#[cfg(target_os = "macos")]
 fn normalize_electron_app_name(process_name: &str, window_title: &str) -> String {
     let process_lower = process_name.to_lowercase();
     let title_lower = window_title.to_lowercase();
@@ -1995,6 +2052,159 @@ fn normalize_electron_app_name(process_name: &str, window_title: &str) -> String
     // 无法识别，返回原始进程名
     log::debug!("无法识别 Electron 应用: {process_name} (标题: {window_title})");
     process_name.to_string()
+}
+
+fn is_generic_frontmost_process_name(process_name: &str) -> bool {
+    let normalized = process_name.trim().to_lowercase();
+    normalized.contains("electron")
+        || normalized == "helper"
+        || normalized.ends_with(" helper")
+        || normalized.contains(" helper (")
+}
+
+fn trim_macos_helper_suffix(name: &str) -> String {
+    let trimmed = name.trim();
+    let lower = trimmed.to_lowercase();
+
+    if let Some(index) = lower.find(" helper (") {
+        return trimmed[..index].trim().to_string();
+    }
+    if let Some(stripped) = trimmed.strip_suffix(" Helper") {
+        return stripped.trim().to_string();
+    }
+    if let Some(stripped) = trimmed.strip_suffix(" helper") {
+        return stripped.trim().to_string();
+    }
+
+    trimmed.to_string()
+}
+
+fn is_generic_app_display_name(name: &str) -> bool {
+    let normalized = trim_macos_helper_suffix(name).trim().to_lowercase();
+    normalized.is_empty()
+        || normalized == "electron"
+        || normalized == "helper"
+        || normalized == "application"
+}
+
+fn display_name_from_macos_app_path(app_path: &str) -> Option<String> {
+    let path = Path::new(app_path);
+    let bundle_name = path
+        .ancestors()
+        .filter(|ancestor| {
+            ancestor
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .map(|ext| ext.eq_ignore_ascii_case("app"))
+                .unwrap_or(false)
+        })
+        .filter_map(|ancestor| ancestor.file_stem().and_then(|name| name.to_str()))
+        .last()?;
+    let candidate = trim_macos_helper_suffix(bundle_name);
+    if is_generic_app_display_name(&candidate) {
+        None
+    } else {
+        Some(candidate)
+    }
+}
+
+fn humanize_bundle_identifier_token(token: &str) -> Option<String> {
+    let trimmed = token.trim_matches(|c: char| !c.is_ascii_alphanumeric());
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let lower = trimmed.to_lowercase();
+    let rendered = if lower.len() <= 3 && lower.chars().all(|ch| ch.is_ascii_alphabetic()) {
+        lower.to_uppercase()
+    } else {
+        let mut chars = lower.chars();
+        let first = chars.next()?;
+        let mut value = String::new();
+        value.extend(first.to_uppercase());
+        value.push_str(chars.as_str());
+        value
+    };
+
+    Some(rendered)
+}
+
+fn display_name_from_bundle_identifier(bundle_identifier: &str) -> Option<String> {
+    let generic_segments = [
+        "com", "cn", "net", "org", "io", "app", "desktop", "helper",
+    ];
+
+    let segments = bundle_identifier
+        .split('.')
+        .map(str::trim)
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>();
+    if segments.is_empty() {
+        return None;
+    }
+
+    let start = segments
+        .iter()
+        .position(|segment| !generic_segments.contains(&segment.to_ascii_lowercase().as_str()))
+        .unwrap_or(segments.len());
+    if start >= segments.len() {
+        return None;
+    }
+
+    let mut tail = segments[start..].to_vec();
+    if tail.len() >= 3 {
+        tail.remove(0);
+    }
+    while tail.len() > 1 {
+        let Some(last) = tail.last() else {
+            break;
+        };
+        let lower = last.to_ascii_lowercase();
+        if matches!(lower.as_str(), "app" | "desktop" | "helper") {
+            tail.pop();
+        } else {
+            break;
+        }
+    }
+
+    let candidate = tail
+        .into_iter()
+        .filter_map(humanize_bundle_identifier_token)
+        .collect::<Vec<_>>()
+        .join(" ");
+    if is_generic_app_display_name(&candidate) {
+        None
+    } else {
+        Some(candidate)
+    }
+}
+
+fn normalize_macos_frontmost_app_name(
+    process_name: &str,
+    window_title: &str,
+    bundle_identifier: Option<&str>,
+    app_path: Option<&str>,
+) -> String {
+    let legacy_name = normalize_electron_app_name(process_name, window_title);
+
+    if !is_generic_frontmost_process_name(process_name) {
+        return normalize_display_app_name(&legacy_name);
+    }
+
+    if let Some(candidate) = app_path
+        .and_then(display_name_from_macos_app_path)
+        .or_else(|| bundle_identifier.and_then(display_name_from_bundle_identifier))
+    {
+        let normalized = normalize_display_app_name(&candidate);
+        log::debug!(
+            "macOS 前台应用识别: {process_name} -> {normalized} (bundle={:?}, path={:?})",
+            bundle_identifier,
+            app_path
+        );
+        return normalized;
+    }
+
+    normalize_display_app_name(&legacy_name)
 }
 
 /// 获取浏览器当前 URL (macOS)

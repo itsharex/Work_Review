@@ -22,3 +22,12 @@ test('分类修改应仅保留时间线入口，不再依赖设置页组件', as
   assert.match(timelineSource, /set_app_category_rule/);
   assert.match(timelineSource, /修改应用默认分类/);
 });
+
+test('时间线修改应用分类后应使概览缓存失效', async () => {
+  const timelineSource = await readFile(
+    new URL('../timeline/Timeline.svelte', import.meta.url),
+    'utf8'
+  );
+
+  assert.match(timelineSource, /cache\.invalidate\('overview'\)/);
+});

@@ -25,6 +25,10 @@ fn safe_local_timestamp(ndt: NaiveDateTime) -> i64 {
     }
 }
 
+fn category_counts_toward_work_time(category: &str) -> bool {
+    crate::monitor::normalize_category_key(category) != "entertainment"
+}
+
 /// 活动记录
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Activity {
@@ -1109,14 +1113,16 @@ impl Database {
 
             total_duration += day_duration;
 
-            work_time_duration += calculate_work_time_overlap_duration(
-                timestamp,
-                duration,
-                start_ts,
-                end_ts,
-                work_start_ts,
-                work_end_ts,
-            );
+            if category_counts_toward_work_time(&category) {
+                work_time_duration += calculate_work_time_overlap_duration(
+                    timestamp,
+                    duration,
+                    start_ts,
+                    end_ts,
+                    work_start_ts,
+                    work_end_ts,
+                );
+            }
 
             let interval_start = timestamp.saturating_sub(duration);
             let overlap_start = interval_start.max(start_ts);
@@ -2642,6 +2648,57 @@ mod tests {
 
         assert_eq!(stats.total_duration, 240 * 60);
         assert_eq!(stats.work_time_duration, 210 * 60);
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[test]
+    fn 娱乐分类不应计入办公时长() {
+        let db_path = temp_db_path("daily-stats-ignore-entertainment-work-time");
+        let db = Database::new(&db_path).expect("创建测试数据库失败");
+        let date = "2026-03-27";
+
+        let records = vec![
+            Activity {
+                id: None,
+                timestamp: local_ts(date, 10, 0),
+                app_name: "Douyin".to_string(),
+                window_title: "推荐".to_string(),
+                screenshot_path: "douyin.jpg".to_string(),
+                ocr_text: None,
+                category: "entertainment".to_string(),
+                duration: 30 * 60,
+                browser_url: None,
+                executable_path: None,
+                semantic_category: Some("休息娱乐".to_string()),
+                semantic_confidence: Some(100),
+            },
+            Activity {
+                id: None,
+                timestamp: local_ts(date, 10, 45),
+                app_name: "Code".to_string(),
+                window_title: "main.rs".to_string(),
+                screenshot_path: "code.jpg".to_string(),
+                ocr_text: None,
+                category: "development".to_string(),
+                duration: 15 * 60,
+                browser_url: None,
+                executable_path: None,
+                semantic_category: Some("编码开发".to_string()),
+                semantic_confidence: Some(100),
+            },
+        ];
+
+        for record in &records {
+            db.insert_activity(record).expect("插入测试数据失败");
+        }
+
+        let stats = db
+            .get_daily_stats_with_work_time(date, 9, 18, 0, 0)
+            .expect("读取今日统计失败");
+
+        assert_eq!(stats.total_duration, 45 * 60);
+        assert_eq!(stats.work_time_duration, 15 * 60);
 
         let _ = std::fs::remove_file(db_path);
     }

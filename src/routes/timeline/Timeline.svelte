@@ -365,6 +365,8 @@
         selectedActivity = { ...selectedActivity, category: nextCategory };
       }
 
+      cache.invalidate('overview');
+
       showToast(
         t('timeline.categoryUpdated', {
           appName: activity.app_name,
