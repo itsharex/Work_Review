@@ -233,6 +233,16 @@
     }
   }
 
+  async function preloadTimelineLeadThumbnails(items) {
+    const leadItems = items
+      .filter((activity) => activity?.screenshot_path)
+      .slice(0, 6);
+
+    await Promise.all(
+      leadItems.map((activity) => loadThumbnail(activity.screenshot_path))
+    );
+  }
+
   const PAGE_SIZE = 12; // 每次加载 12 条 (3行 x 4列)
   const FEATURED_DURATION_THRESHOLD = 20 * 60;
   const FEATURED_CONTEXT_THRESHOLD = 10 * 60;
@@ -315,7 +325,9 @@
         invoke('get_hourly_summaries', { date: selectedDate }),
       ]);
 
-      activities = prepareTimelineActivities(activitiesData);
+      const preparedActivities = prepareTimelineActivities(activitiesData);
+      await preloadTimelineLeadThumbnails(preparedActivities);
+      activities = preparedActivities;
       
       hourlySummaries = summariesData;
       offset = activities.length;
@@ -325,7 +337,7 @@
       cache.setTimeline(selectedDate, activities, summariesData);
       
       // 预加载缩略图
-      activities.forEach(a => loadThumbnail(a.screenshot_path));
+      activities.slice(6).forEach(a => loadThumbnail(a.screenshot_path));
       
       // 后台预加载前 6 张高清图（避免点击时等待）
       activities.slice(0, 6).forEach(a => loadFullImage(a.screenshot_path));
@@ -388,23 +400,31 @@
 
   // 查看活动详情
   async function viewActivity(activity) {
-    selectedActivity = { ...activity, thumbnailLoading: true };
-    
-    // 从数据库获取最新数据（包括 OCR 结果）
-    if (activity.id) {
-      try {
-        const freshActivity = await invoke('get_activity', { id: activity.id });
-        if (freshActivity) {
-          activity = freshActivity;
-        }
-      } catch (e) {
-        console.warn('获取最新活动数据失败:', e);
-      }
-    }
-    
-    // 加载详情页的高清图
-    const thumbnail = await loadFullImage(activity.screenshot_path);
-    selectedActivity = { ...activity, thumbnail, thumbnailLoading: false };
+    const previewThumbnail = getTimelineThumbnail(activity);
+    selectedActivity = {
+      ...activity,
+      thumbnail: getTimelineThumbnail(activity),
+      thumbnailLoading: !!activity.screenshot_path,
+    };
+
+    const freshActivityPromise = activity.id
+      ? invoke('get_activity', { id: activity.id }).catch((e) => {
+          console.warn('获取最新活动数据失败:', e);
+          return null;
+        })
+      : Promise.resolve(null);
+    const fullImagePromise = activity.screenshot_path
+      ? loadFullImage(activity.screenshot_path)
+      : Promise.resolve(previewThumbnail);
+
+    const [freshActivity, thumbnail] = await Promise.all([freshActivityPromise, fullImagePromise]);
+    const resolvedActivity = freshActivity || activity;
+
+    selectedActivity = {
+      ...resolvedActivity,
+      thumbnail: thumbnail || previewThumbnail,
+      thumbnailLoading: false,
+    };
   }
 
   // 打开外部链接

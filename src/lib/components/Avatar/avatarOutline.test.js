@@ -59,6 +59,10 @@ test('桌宠路径不应复用全局 outline 类名，避免 SVG 包围框泄漏
   assert.match(windowSource, /transitionClass = transition\.className/);
   assert.match(windowSource, /getAvatarStateBubble/);
   assert.match(windowSource, /showBubble\(stateBubble\)/);
+  assert.match(
+    windowSource,
+    /nextState\.mode !== state\.mode\s*\|\|\s*nextState\.contextLabel !== state\.contextLabel/
+  );
   assert.match(engineSource, /const AVATAR_SCALE_DEFAULT: f64 = 0\.9;/);
   assert.match(engineSource, /const AVATAR_WINDOW_BASE_WIDTH: f64 = 276\.0;/);
   assert.match(engineSource, /const AVATAR_WINDOW_BASE_HEIGHT: f64 = 170\.0;/);

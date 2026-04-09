@@ -45,6 +45,7 @@ impl AppLocale {
 pub struct GeneratedReport {
     pub content: String,
     pub used_ai: bool,
+    pub fallback_reason: Option<String>,
 }
 
 /// AI分析器 trait

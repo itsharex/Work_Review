@@ -324,6 +324,7 @@ impl Analyzer for LocalAnalyzer {
             AppLocale::En => format!("# Daily Report - {date}\n\n"),
         };
         let mut used_ai = false;
+        let mut fallback_reason = None;
 
         report.push_str(match locale {
             AppLocale::ZhCn => "## 一、今日概览\n\n",
@@ -417,6 +418,11 @@ impl Analyzer for LocalAnalyzer {
             }
             Err(error) => {
                 log::warn!("Ollama 调用失败，使用备选内容: {error}");
+                fallback_reason = Some(match locale {
+                    AppLocale::ZhCn => "请求失败，已回退到基础模板".to_string(),
+                    AppLocale::ZhTw => "請求失敗，已回退到基礎模板".to_string(),
+                    AppLocale::En => "the AI request failed, so the report fell back to the base template".to_string(),
+                });
                 let apps_list = join_list(
                     locale,
                     stats
@@ -485,6 +491,7 @@ impl Analyzer for LocalAnalyzer {
         Ok(GeneratedReport {
             content: report,
             used_ai,
+            fallback_reason,
         })
     }
 }

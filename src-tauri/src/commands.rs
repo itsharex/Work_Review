@@ -2961,6 +2961,7 @@ pub async fn generate_report(
             content: report.clone(),
             ai_mode: saved_ai_mode,
             model_name: saved_model_name,
+            fallback_reason: generated_report.fallback_reason.clone(),
             created_at: chrono::Utc::now().timestamp(),
         };
         state.database.save_report(&daily_report)?;

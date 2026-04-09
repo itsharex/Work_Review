@@ -112,7 +112,7 @@
             <h1 class="sidebar-brand-title">Work Review</h1>
             <p class="sidebar-brand-line" aria-label={translate('sidebar.tagline')}>
               {#each sidebarTagSegments as segment, index}
-                <span>{segment}</span>
+                <span class="sidebar-brand-segment">{segment}</span>
                 {#if index < sidebarTagSegments.length - 1}
                   <span class="sidebar-brand-separator">·</span>
                 {/if}

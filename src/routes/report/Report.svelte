@@ -8,6 +8,7 @@
   import { cache } from '../../lib/stores/cache.js';
   import { formatLocalizedDate, formatLocalizedTime, locale, t } from '$lib/i18n/index.js';
   import { shouldShowPromptAppliedToast } from './reportPromptFeedback.js';
+  import { resolveReportMeta } from './reportMeta.js';
   import LocalizedDatePicker from '../../lib/components/LocalizedDatePicker.svelte';
 
   function getLocalDateString() {
@@ -45,29 +46,17 @@
     return modeNames[normalizedMode] || mode || t('report.modeNames.unknown');
   }
 
-  function resolveReportMeta(reportData, currentConfig) {
-    const fallbackHint = reportData?.content || '';
-    let aiMode = reportData?.ai_mode || currentConfig?.ai_mode || '';
-    let modelName = reportData?.model_name || null;
+  function getConfigMetaSummary(meta) {
+    return [
+      getAiModeName(meta?.configMode),
+      meta?.configMode === 'summary' ? meta?.configModelName : null,
+    ]
+      .filter(Boolean)
+      .join(' · ');
+  }
 
-    aiMode = (aiMode || '').toString().trim().toLowerCase();
-
-    if (
-      fallbackHint.includes('由基础模板生成') ||
-      fallbackHint.includes('使用基础模板生成') ||
-      fallbackHint.includes('由基礎模板生成') ||
-      fallbackHint.includes('使用基礎模板生成') ||
-      fallbackHint.toLowerCase().includes('generated from the base template')
-    ) {
-      aiMode = 'local';
-      modelName = null;
-    }
-
-    if (!reportData && currentConfig?.ai_mode === 'summary' && currentConfig?.text_model?.model) {
-      modelName = currentConfig.text_model.model;
-    }
-
-    return { aiMode, modelName };
+  function getFallbackReasonText(meta) {
+    return meta?.fallbackReason || t('report.savedReportNotAi');
   }
 
   async function loadConfig() {
@@ -303,16 +292,23 @@
           {selectedDate === getLocalDateString() ? t('report.todayReport') : t('report.historyReport')}
         </h2>
         <div class="report-hero-meta">
-          <span class="report-hero-date">{formatReportDate(selectedDate)}</span>
+          <div class="report-hero-date-row">
+            <span class="report-hero-date">{formatReportDate(selectedDate)}</span>
+          </div>
           {#if config || report}
-            <div class="report-hero-badges">
-              <span class="{reportMeta.aiMode === 'summary' ? 'page-inline-chip-brand' : 'page-inline-chip-muted'}">
-                {getAiModeName(reportMeta.aiMode)}
-              </span>
-              {#if reportMeta.aiMode === 'summary' && reportMeta.modelName}
-                <span class="page-inline-chip-muted">
-                  {reportMeta.modelName}
-                </span>
+            <div class="report-hero-status-row">
+              <p class="report-hero-summary-line">
+                <span class="report-hero-summary-label">{t('report.currentReportLabel')}</span>
+                <span class="report-hero-summary-divider">·</span>
+                <span class="report-hero-summary-value">{getAiModeName(reportMeta.reportMode)}</span>
+              </p>
+              {#if reportMeta.showUsageMismatchNotice}
+                <p class="report-hero-mode-note">{t('report.aiNotAppliedPrefix')}{getFallbackReasonText(reportMeta)}</p>
+              {/if}
+              {#if reportMeta.showConfigMeta}
+                <p class="report-hero-config-note">
+                  {t('report.currentConfigLabel')}：{getConfigMetaSummary(reportMeta)}
+                </p>
               {/if}
             </div>
           {/if}
@@ -431,24 +427,31 @@
   {:else if report}
     <!-- 昨日日报提示 -->
     {#if isYesterdayReport}
-      <div class="page-banner-warning mb-4">
-        <div class="flex items-center gap-2 text-sm">
+      <div class="page-banner-warning report-fallback-banner mb-4">
+        <div class="report-fallback-copy">
+          <div class="flex items-center gap-2 text-sm">
           <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
           </svg>
           {t('report.showingYesterday', { date: formatReportDate(report.date) })}
+          </div>
         </div>
-        <button
-          class="page-action-warn min-h-9 px-3 text-xs rounded-lg shadow-none"
-          on:click={() => generateReport(false)}
-          disabled={generating}
-        >
-          {#if generating}
-            <div class="animate-spin rounded-full h-3 w-3 border-2 border-white border-t-transparent"></div>
-          {:else}
-            ✨ {t('report.generatingToday')}
-          {/if}
-        </button>
+        <div class="report-fallback-action">
+          <button
+            class="page-action-warn report-fallback-button min-h-9 px-3 text-xs rounded-lg shadow-none"
+            on:click={() => generateReport(false)}
+            disabled={generating}
+          >
+            {#if generating}
+              <div class="inline-flex items-center gap-2">
+                <div class="animate-spin rounded-full h-3 w-3 border-2 border-white border-t-transparent"></div>
+                <span>{t('report.generating')}</span>
+              </div>
+            {:else}
+              ✨ {t('report.generatingToday')}
+            {/if}
+          </button>
+        </div>
       </div>
     {/if}
     <div class="page-card report-sheet report-article-card">

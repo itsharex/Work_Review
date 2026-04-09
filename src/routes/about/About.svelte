@@ -157,14 +157,14 @@
     </section>
 
     <section class="about-tech-stack">
-      <span class="about-tech-pill about-tech-pill-primary">Tauri 2</span>
-      <span class="about-tech-pill">Svelte</span>
-      <span class="about-tech-pill">Rust</span>
-      <span class="about-tech-pill">SQLite</span>
+      <span class="about-tech-pill about-tech-pill-primary"><span class="about-tech-pill-label">Tauri 2</span></span>
+      <span class="about-tech-pill"><span class="about-tech-pill-label">Svelte</span></span>
+      <span class="about-tech-pill"><span class="about-tech-pill-label">Rust</span></span>
+      <span class="about-tech-pill"><span class="about-tech-pill-label">SQLite</span></span>
     </section>
 
     {#if updateStatus}
-      <div class="page-banner-warning justify-center text-center">
+      <div class="page-banner-warning about-update-banner">
         <div>
           <p class="font-semibold">{t('about.updateStatus')}</p>
           <p class="text-sm mt-1">{updateStatus}</p>

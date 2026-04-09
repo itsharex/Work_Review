@@ -71,6 +71,36 @@ fn ai_system_prompt(locale: AppLocale) -> &'static str {
     }
 }
 
+fn empty_ai_fallback_reason(locale: AppLocale) -> String {
+    match locale {
+        AppLocale::ZhCn => "返回空内容，已回退到基础模板".to_string(),
+        AppLocale::ZhTw => "回傳空內容，已回退到基礎模板".to_string(),
+        AppLocale::En => "the model returned empty content, so the report fell back to the base template".to_string(),
+    }
+}
+
+fn request_ai_fallback_reason(locale: AppLocale, error_text: &str) -> String {
+    let normalized = error_text.to_lowercase();
+    let is_config_issue = normalized.contains("未配置")
+        || normalized.contains("not configured")
+        || normalized.contains("api key")
+        || normalized.contains("endpoint");
+
+    match (locale, is_config_issue) {
+        (AppLocale::ZhCn, true) => "配置不可用，已回退到基础模板".to_string(),
+        (AppLocale::ZhCn, false) => "请求失败，已回退到基础模板".to_string(),
+        (AppLocale::ZhTw, true) => "配置不可用，已回退到基礎模板".to_string(),
+        (AppLocale::ZhTw, false) => "請求失敗，已回退到基礎模板".to_string(),
+        (AppLocale::En, true) => {
+            "the AI configuration was unavailable, so the report fell back to the base template"
+                .to_string()
+        }
+        (AppLocale::En, false) => {
+            "the AI request failed, so the report fell back to the base template".to_string()
+        }
+    }
+}
+
 /// 摘要上传分析器
 /// 只上传统计摘要，不上传原始截图
 pub struct SummaryAnalyzer {
@@ -669,8 +699,17 @@ impl Analyzer for SummaryAnalyzer {
             .generate_ai_content(&self.build_ai_prompt(date, stats, activities))
             .await
         {
-            Ok(content) if !content.is_empty() => (content, true),
-            Ok(_) | Err(_) => (self.generate_fallback_ai_content(&apps_list), false),
+            Ok(content) if !content.is_empty() => (content, true, None),
+            Ok(_) => (
+                self.generate_fallback_ai_content(&apps_list),
+                false,
+                Some(empty_ai_fallback_reason(locale)),
+            ),
+            Err(error) => (
+                self.generate_fallback_ai_content(&apps_list),
+                false,
+                Some(request_ai_fallback_reason(locale, &error.to_string())),
+            ),
         };
 
         report.push_str(&ai_content.0);
@@ -678,13 +717,17 @@ impl Analyzer for SummaryAnalyzer {
         Ok(GeneratedReport {
             content: report,
             used_ai: ai_content.1,
+            fallback_reason: ai_content.2,
         })
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::summary_request_timeout;
+    use super::{
+        empty_ai_fallback_reason, request_ai_fallback_reason, summary_request_timeout,
+    };
+    use crate::analysis::AppLocale;
     use crate::config::AiProvider;
     use std::time::Duration;
 
@@ -717,6 +760,22 @@ mod tests {
         assert_eq!(
             summary_request_timeout(AiProvider::Gemini, "https://generativelanguage.googleapis.com/v1"),
             Duration::from_secs(90)
+        );
+    }
+
+    #[test]
+    fn ai回退原因应返回面向前端的友好中文文案() {
+        assert_eq!(
+            empty_ai_fallback_reason(AppLocale::ZhCn),
+            "返回空内容，已回退到基础模板"
+        );
+        assert_eq!(
+            request_ai_fallback_reason(AppLocale::ZhCn, "Gemini API Key 未配置"),
+            "配置不可用，已回退到基础模板"
+        );
+        assert_eq!(
+            request_ai_fallback_reason(AppLocale::ZhCn, "API 错误: 500"),
+            "请求失败，已回退到基础模板"
         );
     }
 }

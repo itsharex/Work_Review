@@ -27,3 +27,15 @@ test('侧边栏应提供编辑部导航框架', async () => {
   assert.match(appCssSource, /\.sidebar-toolbelt\s*\{[\s\S]*background:\s*transparent;/);
   assert.match(appCssSource, /\.sidebar-toolbelt\s*\{[\s\S]*border:\s*none;/);
 });
+
+test('侧边栏品牌副标题在英文下应允许换行而不是被硬裁切', async () => {
+  const [source, appCssSource] = await Promise.all([
+    readFile(new URL('./Sidebar.svelte', import.meta.url), 'utf8'),
+    readFile(new URL('../../app.css', import.meta.url), 'utf8'),
+  ]);
+
+  assert.match(source, /sidebar-brand-line/);
+  assert.match(source, /sidebar-brand-segment/);
+  assert.match(appCssSource, /\.sidebar-brand-line\b[\s\S]*flex-wrap:/);
+  assert.match(appCssSource, /\.sidebar-brand-segment\b/);
+});

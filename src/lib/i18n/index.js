@@ -297,6 +297,12 @@ const MESSAGES = {
       title: '时段摘要',
       description: '按小时快速回看这一天的工作章节。',
       peakBadge: '高峰',
+      appsCount: '{count} 个主应用',
+      rhythm: {
+        deep: '深度推进',
+        steady: '持续推进',
+        light: '轻量切换',
+      },
       noData: '暂无数据',
     },
     about: {
@@ -496,6 +502,10 @@ const MESSAGES = {
       generationOptions: '生成选项',
       templateModeHint: '当前是基础模板模式，附加提示词仅在「AI 增强」模式下生效。',
       promptPlaceholder: '例如：先给结论再展开；更偏周报口吻；突出产出、风险和下一步。',
+      currentReportLabel: '当前日报',
+      currentConfigLabel: '当前配置',
+      aiNotAppliedPrefix: 'AI 未生效：',
+      savedReportNotAi: '上次生成已回退到基础模板，或当前查看的是旧日报。',
       modeNames: {
         local: '基础模板',
         summary: 'AI 增强',
@@ -856,6 +866,12 @@ const MESSAGES = {
       title: 'Hourly Summary',
       description: 'Scan the day hour by hour as short work chapters.',
       peakBadge: 'Peak',
+      appsCount: '{count} primary apps',
+      rhythm: {
+        deep: 'Deep Work',
+        steady: 'Steady Flow',
+        light: 'Light Switches',
+      },
       noData: 'No data yet',
     },
     about: {
@@ -1062,6 +1078,10 @@ const MESSAGES = {
       generationOptions: 'Generation Options',
       templateModeHint: 'You are currently using template mode. Extra prompts only apply in AI Enhanced mode.',
       promptPlaceholder: 'For example: Start with conclusions, use a weekly review tone, and highlight outputs, risks, and next steps.',
+      currentReportLabel: 'Current Report',
+      currentConfigLabel: 'Current Config',
+      aiNotAppliedPrefix: 'AI inactive: ',
+      savedReportNotAi: 'the last generation fell back to the base template, or you are viewing an older report.',
       modeNames: {
         local: 'Template',
         summary: 'AI Enhanced',
@@ -1422,6 +1442,12 @@ const MESSAGES = {
       title: '時段摘要',
       description: '按小時快速回看這一天的工作章節。',
       peakBadge: '高峰',
+      appsCount: '{count} 個主應用',
+      rhythm: {
+        deep: '深度推進',
+        steady: '持續推進',
+        light: '輕量切換',
+      },
       noData: '暫無資料',
     },
     about: {
@@ -1626,6 +1652,10 @@ const MESSAGES = {
       generationOptions: '生成選項',
       templateModeHint: '目前是基礎模板模式，附加提示詞僅在「AI 增強」模式下生效。',
       promptPlaceholder: '例如：先給結論再展開；更偏週報口吻；突出產出、風險和下一步。',
+      currentReportLabel: '目前日報',
+      currentConfigLabel: '目前配置',
+      aiNotAppliedPrefix: 'AI 未生效：',
+      savedReportNotAi: '上次生成已回退到基礎模板，或目前查看的是舊日報。',
       modeNames: {
         local: '基礎模板',
         summary: 'AI 增強',

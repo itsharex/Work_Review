@@ -214,6 +214,7 @@ impl Analyzer for CloudAnalyzer {
         Ok(GeneratedReport {
             content: self.generate_final_report(date, stats, &insights).await?,
             used_ai: true,
+            fallback_reason: None,
         })
     }
 }

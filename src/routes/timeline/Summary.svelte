@@ -3,6 +3,12 @@
   import { link } from 'svelte-spa-router';
   import { formatDurationLocalized, locale, t } from '$lib/i18n/index.js';
   import LocalizedDatePicker from '../../lib/components/LocalizedDatePicker.svelte';
+  import {
+    getMainApps,
+    getPrimarySummary,
+    getSecondarySummary,
+    getSummaryRhythmMeta,
+  } from './summaryPresentation.js';
 
   function getLocalDateString() {
     const now = new Date();
@@ -16,43 +22,6 @@
   let lastLoadedDate = null;
   $: currentLocale = $locale;
   $: peakDuration = summaries.reduce((max, summary) => Math.max(max, summary.total_duration || 0), 0);
-
-  function clampSummary(text, maxLength = 72) {
-    if (text.length <= maxLength) {
-      return text;
-    }
-    return `${text.slice(0, maxLength - 1).trim()}…`;
-  }
-
-  function getPrimarySummary(text) {
-    const normalized = (text || '').replace(/\s+/g, ' ').trim();
-    if (!normalized) {
-      return t('timelineSummary.noData');
-    }
-
-    const sentenceParts = normalized
-      .split(/[。！？!?]/)
-      .map((item) => item.trim())
-      .filter(Boolean);
-    const sentence = sentenceParts[0] || normalized;
-    const clauses = sentence
-      .split(/[，,；;、]/)
-      .map((item) => item.trim())
-      .filter(Boolean);
-
-    if (clauses.length >= 3) {
-      return clampSummary(clauses.slice(0, 2).join('，'));
-    }
-    return clampSummary(sentence);
-  }
-
-  function getMainApps(mainApps) {
-    return (mainApps || '')
-      .split(/[，,]/)
-      .map((item) => item.trim())
-      .filter(Boolean)
-      .slice(0, 4);
-  }
 
   function formatHourLabel(hour) {
     return `${String(hour).padStart(2, '0')}:00`;
@@ -131,6 +100,8 @@
       {#each summaries as summary}
         {@const apps = getMainApps(summary.main_apps)}
         {@const peak = isPeakSummary(summary)}
+        {@const secondarySummary = getSecondarySummary(summary.summary)}
+        {@const rhythm = getSummaryRhythmMeta(summary.total_duration)}
         <section class={`summary-band ${peak ? 'summary-band-peak' : ''}`}>
           <div class="summary-band-anchor">
             <div class="summary-band-hour">{formatHourLabel(summary.hour)}</div>
@@ -139,11 +110,24 @@
 
           <div class="summary-band-card">
             <div class="summary-band-card-header">
-              <p class="summary-primary-copy">{getPrimarySummary(summary.summary)}</p>
+              <p class="summary-primary-copy">{getPrimarySummary(summary.summary) || t('timelineSummary.noData')}</p>
               {#if peak}
                 <span class="summary-peak-badge">{t('timelineSummary.peakBadge')}</span>
               {/if}
             </div>
+
+            <div class="summary-meta-row">
+              <span class={`summary-rhythm-chip summary-rhythm-chip-${rhythm.tone}`}>
+                {t(`timelineSummary.rhythm.${rhythm.tone}`)}
+              </span>
+              {#if apps.length > 0}
+                <span class="summary-app-count">{t('timelineSummary.appsCount', { count: apps.length })}</span>
+              {/if}
+            </div>
+
+            {#if secondarySummary}
+              <p class="summary-secondary-copy">{secondarySummary}</p>
+            {/if}
 
             {#if apps.length > 0}
               <div class="summary-app-tags">
@@ -346,6 +330,53 @@
     letter-spacing: 0.08em;
   }
 
+  .summary-meta-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.55rem;
+    margin-top: 0.85rem;
+  }
+
+  .summary-rhythm-chip {
+    display: inline-flex;
+    align-items: center;
+    min-height: 1.7rem;
+    padding: 0.18rem 0.68rem;
+    border-radius: 999px;
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    line-height: 1;
+  }
+
+  .summary-rhythm-chip-deep {
+    background: rgba(30, 41, 59, 0.92);
+    color: #f8fafc;
+  }
+
+  .summary-rhythm-chip-steady {
+    background: rgba(224, 231, 255, 0.88);
+    color: #4338ca;
+  }
+
+  .summary-rhythm-chip-light {
+    background: rgba(255, 247, 237, 0.92);
+    color: #c2410c;
+  }
+
+  .summary-app-count {
+    font-size: 0.76rem;
+    color: #78716c;
+  }
+
+  .summary-secondary-copy {
+    margin: 0.72rem 0 0;
+    color: #57534e;
+    font-size: 0.84rem;
+    line-height: 1.7;
+  }
+
   .summary-app-tags {
     display: flex;
     flex-wrap: wrap;
@@ -435,6 +466,29 @@
   :global(.dark) .summary-peak-badge {
     background: rgba(120, 53, 15, 0.24);
     color: #fdba74;
+  }
+
+  :global(.dark) .summary-rhythm-chip-deep {
+    background: rgba(248, 250, 252, 0.16);
+    color: #f8fafc;
+  }
+
+  :global(.dark) .summary-rhythm-chip-steady {
+    background: rgba(79, 70, 229, 0.22);
+    color: #c4b5fd;
+  }
+
+  :global(.dark) .summary-rhythm-chip-light {
+    background: rgba(120, 53, 15, 0.24);
+    color: #fdba74;
+  }
+
+  :global(.dark) .summary-app-count {
+    color: #94a3b8;
+  }
+
+  :global(.dark) .summary-secondary-copy {
+    color: #cbd5e1;
   }
 
   :global(.dark) .summary-app-tag {

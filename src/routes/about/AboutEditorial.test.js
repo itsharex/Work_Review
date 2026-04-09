@@ -27,3 +27,16 @@ test('关于页应接入编辑部风格壳层与信息分组', async () => {
   assert.match(appCssSource, /\.about-tech-pill/);
   assert.doesNotMatch(appCssSource, /\.about-system-note/);
 });
+
+test('关于页技术栈胶囊与更新状态提示应支持换行和窄宽度自适应', async () => {
+  const [aboutSource, appCssSource] = await Promise.all([
+    readFile(new URL('./About.svelte', import.meta.url), 'utf8'),
+    readFile(new URL('../../app.css', import.meta.url), 'utf8'),
+  ]);
+
+  assert.match(aboutSource, /about-tech-pill-label/);
+  assert.match(aboutSource, /about-update-banner/);
+  assert.match(appCssSource, /\.about-tech-pill-label\b/);
+  assert.match(appCssSource, /\.about-update-banner\b/);
+  assert.match(appCssSource, /\.about-tech-pill\b[\s\S]*max-width:/);
+});

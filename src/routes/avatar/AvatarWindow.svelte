@@ -223,7 +223,9 @@
 
       unlistenState = await appWindow.listen('avatar-state-changed', (event) => {
         const nextState = event.payload;
-        const stateBubble = getAvatarStateBubble(nextState.mode, currentLocale);
+        const stateChanged =
+          nextState.mode !== state.mode || nextState.contextLabel !== state.contextLabel;
+        const stateBubble = getAvatarStateBubble(nextState.mode, currentLocale, nextState.contextLabel);
         const transition = getAvatarTransitionMeta(
           state.mode,
           nextState.mode,
@@ -233,7 +235,7 @@
 
         if (
           stateBubble &&
-          nextState.mode !== state.mode &&
+          stateChanged &&
           Date.now() - lastStateBubbleAt > 900
         ) {
           lastStateBubbleAt = Date.now();

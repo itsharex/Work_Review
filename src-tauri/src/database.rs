@@ -63,6 +63,8 @@ pub struct DailyReport {
     pub content: String,
     pub ai_mode: String,
     pub model_name: Option<String>,
+    #[serde(default)]
+    pub fallback_reason: Option<String>,
     pub created_at: i64,
 }
 
@@ -418,6 +420,7 @@ impl Database {
                 content TEXT NOT NULL,
                 ai_mode TEXT NOT NULL,
                 model_name TEXT,
+                fallback_reason TEXT,
                 created_at INTEGER NOT NULL
             )",
             [],
@@ -430,15 +433,22 @@ impl Database {
                 content TEXT NOT NULL,
                 ai_mode TEXT NOT NULL,
                 model_name TEXT,
+                fallback_reason TEXT,
                 created_at INTEGER NOT NULL,
                 UNIQUE(date, locale)
             )",
             [],
         )?;
 
+        let _ = conn.execute("ALTER TABLE daily_reports ADD COLUMN fallback_reason TEXT", []);
+        let _ = conn.execute(
+            "ALTER TABLE daily_reports_localized ADD COLUMN fallback_reason TEXT",
+            [],
+        );
+
         conn.execute(
-            "INSERT OR IGNORE INTO daily_reports_localized (date, locale, content, ai_mode, model_name, created_at)
-             SELECT date, 'zh-CN', content, ai_mode, model_name, created_at
+            "INSERT OR IGNORE INTO daily_reports_localized (date, locale, content, ai_mode, model_name, fallback_reason, created_at)
+             SELECT date, 'zh-CN', content, ai_mode, model_name, fallback_reason, created_at
              FROM daily_reports",
             [],
         )?;
@@ -1545,14 +1555,15 @@ impl Database {
         })?;
 
         conn.execute(
-            "INSERT OR REPLACE INTO daily_reports_localized (date, locale, content, ai_mode, model_name, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT OR REPLACE INTO daily_reports_localized (date, locale, content, ai_mode, model_name, fallback_reason, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 report.date,
                 report.locale,
                 report.content,
                 report.ai_mode,
                 report.model_name,
+                report.fallback_reason,
                 report.created_at,
             ],
         )?;
@@ -1568,7 +1579,7 @@ impl Database {
         let locale = locale.unwrap_or("zh-CN");
 
         let result = conn.query_row(
-            "SELECT date, locale, content, ai_mode, model_name, created_at
+            "SELECT date, locale, content, ai_mode, model_name, fallback_reason, created_at
              FROM daily_reports_localized
              WHERE date = ?1 AND locale = ?2",
             params![date, locale],
@@ -1579,7 +1590,8 @@ impl Database {
                     content: row.get(2)?,
                     ai_mode: row.get(3)?,
                     model_name: row.get(4)?,
-                    created_at: row.get(5)?,
+                    fallback_reason: row.get(5)?,
+                    created_at: row.get(6)?,
                 })
             },
         );
@@ -3029,6 +3041,7 @@ mod tests {
             content: "# 工作日报\n\n中文内容".to_string(),
             ai_mode: "summary".to_string(),
             model_name: Some("gemma3:270m".to_string()),
+            fallback_reason: Some("请求失败，已回退到基础模板".to_string()),
             created_at: now,
         })
         .expect("保存中文日报失败");
@@ -3039,6 +3052,7 @@ mod tests {
             content: "# Daily Report\n\nEnglish content".to_string(),
             ai_mode: "summary".to_string(),
             model_name: Some("gemma3:270m".to_string()),
+            fallback_reason: None,
             created_at: now + 1,
         })
         .expect("保存英文日报失败");
@@ -3054,6 +3068,11 @@ mod tests {
 
         assert_eq!(zh_report.content, "# 工作日报\n\n中文内容");
         assert_eq!(en_report.content, "# Daily Report\n\nEnglish content");
+        assert_eq!(
+            zh_report.fallback_reason.as_deref(),
+            Some("请求失败，已回退到基础模板")
+        );
+        assert_eq!(en_report.fallback_reason, None);
 
         let _ = std::fs::remove_file(db_path);
     }
@@ -3090,6 +3109,7 @@ mod tests {
             content: "# 工作日报\n\n今天主要在修 bug。".to_string(),
             ai_mode: "summary".to_string(),
             model_name: Some("gpt-4.1".to_string()),
+            fallback_reason: Some("返回空内容，已回退到基础模板".to_string()),
             created_at: now,
         })
         .expect("保存日报失败");
@@ -3109,6 +3129,10 @@ mod tests {
         assert_eq!(activity.window_title, "npm run tauri dev");
         assert_eq!(activity.screenshot_path, "term.jpg");
         assert_eq!(report.content, "# 工作日报\n\n今天主要在修 bug。");
+        assert_eq!(
+            report.fallback_reason.as_deref(),
+            Some("返回空内容，已回退到基础模板")
+        );
 
         let _ = std::fs::remove_file(source_path);
         let _ = std::fs::remove_file(backup_path);

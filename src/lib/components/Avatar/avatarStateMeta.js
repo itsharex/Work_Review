@@ -284,6 +284,134 @@ const STATE_BUBBLES = {
   },
 };
 
+const CONTEXT_BUBBLE_MESSAGES = {
+  编码中: {
+    'zh-CN': '编码中',
+    'zh-TW': '編碼中',
+    en: 'Coding',
+  },
+  写作中: {
+    'zh-CN': '写作中',
+    'zh-TW': '寫作中',
+    en: 'Writing',
+  },
+  规划中: {
+    'zh-CN': '规划中',
+    'zh-TW': '規劃中',
+    en: 'Planning',
+  },
+  排期中: {
+    'zh-CN': '排期中',
+    'zh-TW': '排期中',
+    en: 'Scheduling',
+  },
+  拆解中: {
+    'zh-CN': '拆解中',
+    'zh-TW': '拆解中',
+    en: 'Breaking Down',
+  },
+  沟通中: {
+    'zh-CN': '沟通中',
+    'zh-TW': '溝通中',
+    en: 'Discussing',
+  },
+  创作中: {
+    'zh-CN': '创作中',
+    'zh-TW': '創作中',
+    en: 'Creating',
+  },
+  总结中: {
+    'zh-CN': '总结中',
+    'zh-TW': '總結中',
+    en: 'Summarizing',
+  },
+  方案中: {
+    'zh-CN': '方案中',
+    'zh-TW': '方案中',
+    en: 'Drafting',
+  },
+  判断中: {
+    'zh-CN': '判断中',
+    'zh-TW': '判斷中',
+    en: 'Assessing',
+  },
+  文档中: {
+    'zh-CN': '文档中',
+    'zh-TW': '文件中',
+    en: 'Docs',
+  },
+  调研中: {
+    'zh-CN': '调研中',
+    'zh-TW': '調研中',
+    en: 'Researching',
+  },
+  休息中: {
+    'zh-CN': '休息中',
+    'zh-TW': '休息中',
+    en: 'Resting',
+  },
+  开会中: {
+    'zh-CN': '开会中',
+    'zh-TW': '開會中',
+    en: 'Meeting',
+  },
+  演示中: {
+    'zh-CN': '演示中',
+    'zh-TW': '演示中',
+    en: 'Presenting',
+  },
+  通话中: {
+    'zh-CN': '通话中',
+    'zh-TW': '通話中',
+    en: 'On a Call',
+  },
+  听歌中: {
+    'zh-CN': '听歌中',
+    'zh-TW': '聽歌中',
+    en: 'Music',
+  },
+  播客中: {
+    'zh-CN': '播客中',
+    'zh-TW': '播客中',
+    en: 'Podcast',
+  },
+  视频中: {
+    'zh-CN': '视频中',
+    'zh-TW': '影片中',
+    en: 'Video',
+  },
+  学习中: {
+    'zh-CN': '学习中',
+    'zh-TW': '學習中',
+    en: 'Learning',
+  },
+  直播中: {
+    'zh-CN': '直播中',
+    'zh-TW': '直播中',
+    en: 'Live Stream',
+  },
+  生成中: {
+    'zh-CN': '生成中',
+    'zh-TW': '生成中',
+    en: 'Generating',
+  },
+};
+
+function resolveContextBubbleKey(contextLabel = '') {
+  if (!contextLabel) {
+    return '';
+  }
+
+  if (CONTEXT_BUBBLE_MESSAGES[contextLabel]) {
+    return contextLabel;
+  }
+
+  return Object.keys(CONTEXT_BUBBLE_MESSAGES).find((key) => {
+    const localizedSet = CONTEXT_BUBBLE_MESSAGES[key];
+    return Object.values(localizedSet).includes(contextLabel);
+  }) || '';
+}
+
 const IDLE_MOTION_VARIANTS = {
   idle: [
     { shellClass: 'idle-breathe', headClass: 'idle-head-neutral' },
@@ -762,12 +890,30 @@ export function getAvatarModeMeta(mode, contextLabel = '') {
   };
 }
 
-export function getAvatarStateBubble(mode, locale = 'zh-CN') {
+export function getAvatarStateBubble(mode, locale = 'zh-CN', contextLabel = '') {
   const messageSet = STATE_BUBBLES[mode];
   if (!messageSet) {
     return null;
   }
-  return messageSet[locale] || messageSet['zh-CN'] || null;
+
+  const baseBubble = messageSet[locale] || messageSet['zh-CN'] || null;
+  if (!baseBubble) {
+    return null;
+  }
+
+  const contextKey = resolveContextBubbleKey(contextLabel);
+  if (!contextKey) {
+    return baseBubble;
+  }
+
+  const localizedContext = CONTEXT_BUBBLE_MESSAGES[contextKey]?.[locale]
+    || CONTEXT_BUBBLE_MESSAGES[contextKey]?.['zh-CN']
+    || contextKey;
+
+  return {
+    ...baseBubble,
+    message: localizedContext,
+  };
 }
 
 export function getAvatarActionLoopMeta(mode, contextLabel = '', beat = 0) {

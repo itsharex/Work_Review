@@ -42,6 +42,21 @@ test('桌宠状态切换气泡应返回短文案', () => {
     tone: 'info',
     duration: 1800,
   });
+  assert.deepEqual(getAvatarStateBubble('working', 'zh-CN', '编码中'), {
+    message: '编码中',
+    tone: 'info',
+    duration: 1800,
+  });
+  assert.deepEqual(getAvatarStateBubble('working', 'en', '写作中'), {
+    message: 'Writing',
+    tone: 'info',
+    duration: 1800,
+  });
+  assert.deepEqual(getAvatarStateBubble('reading', 'zh-TW', '調研中'), {
+    message: '調研中',
+    tone: 'info',
+    duration: 1800,
+  });
   assert.equal(getAvatarStateBubble('unknown'), null);
 });
 
