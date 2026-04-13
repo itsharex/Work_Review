@@ -188,30 +188,27 @@
 
 .app-shell-window-controls {
   align-items: center;
-  gap: 0.28rem;
+  gap: 0;
   height: auto;
-  margin-top: 0.25rem;
-  margin-right: 0.55rem;
-  padding: 0.18rem;
-  border-radius: 999px;
-  border: 1px solid rgba(226, 232, 240, 0.84);
-  background: rgba(248, 250, 252, 0.72);
-  box-shadow:
-    0 10px 20px rgba(15, 23, 42, 0.08),
-    inset 0 1px 0 rgba(255, 255, 255, 0.72);
-  backdrop-filter: blur(18px);
+  margin-top: 0.2rem;
+  margin-right: 0.35rem;
+  padding: 0.12rem 0.15rem;
+  border-radius: 0.55rem;
+  border: 1px solid rgba(226, 232, 240, 0.56);
+  background: rgba(248, 250, 252, 0.48);
+  box-shadow: none;
+  backdrop-filter: none;
 }
 
 .app-shell-window-btn {
-  width: 2rem;
-  height: 1.5rem;
+  width: 2.2rem;
+  height: 1.65rem;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border-radius: 0.85rem;
+  border-radius: 0.4rem;
   color: #64748b;
   transition:
-    transform 160ms ease,
     background-color 160ms ease,
     color 160ms ease;
 }
@@ -222,9 +219,8 @@
 }
 
 .app-shell-window-btn:hover {
-  transform: translateY(-1px);
-  background: rgba(255, 255, 255, 0.84);
-  color: #0f172a;
+  background: rgba(226, 232, 240, 0.52);
+  color: #1e293b;
 }
 
 .app-shell-window-btn:focus-visible {
@@ -263,11 +259,9 @@
 }
 
 .dark .app-shell-window-controls {
-  border-color: rgba(71, 85, 105, 0.52);
-  background: rgba(15, 23, 42, 0.7);
-  box-shadow:
-    0 10px 20px rgba(2, 6, 23, 0.28),
-    inset 0 1px 0 rgba(148, 163, 184, 0.08);
+  border-color: rgba(71, 85, 105, 0.4);
+  background: rgba(15, 23, 42, 0.48);
+  box-shadow: none;
 }
 
 .dark .app-shell-window-btn {

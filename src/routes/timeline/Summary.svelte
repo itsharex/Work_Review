@@ -224,8 +224,8 @@
     bottom: 0.4rem;
     width: 2px;
     border-radius: 999px;
-    background: linear-gradient(180deg, rgba(31, 41, 55, 0.86), rgba(31, 41, 55, 0.08));
-    opacity: 0.88;
+    background: linear-gradient(180deg, rgba(31, 41, 55, 0.88), rgba(31, 41, 55, 0.08));
+    opacity: 0.9;
   }
 
   .summary-band {
@@ -255,20 +255,20 @@
     position: absolute;
     top: 1.2rem;
     right: 0.05rem;
-    width: 0.78rem;
-    height: 0.78rem;
+    width: 0.8rem;
+    height: 0.8rem;
     border-radius: 999px;
     background: #1f2937;
     box-shadow:
-      0 0 0 0.33rem rgba(255, 251, 235, 0.98),
-      0 0 0 0.44rem rgba(31, 41, 55, 0.08);
+      0 0 0 0.32rem rgba(255, 251, 235, 0.96),
+      0 0 0 0.4rem rgba(31, 41, 55, 0.08);
   }
 
   .summary-band-peak .summary-band-anchor::after {
     background: #b45309;
     box-shadow:
-      0 0 0 0.33rem rgba(255, 251, 235, 0.98),
-      0 0 0 0.5rem rgba(180, 83, 9, 0.14);
+      0 0 0 0.32rem rgba(255, 251, 235, 0.96),
+      0 0 0 0.5rem rgba(180, 83, 9, 0.12);
   }
 
   .summary-band-hour {
@@ -421,20 +421,20 @@
   }
 
   :global(.dark) .summary-editorial-shell::before {
-    background: linear-gradient(180deg, rgba(248, 250, 252, 0.82), rgba(148, 163, 184, 0.08));
+    background: linear-gradient(180deg, rgba(248, 250, 252, 0.84), rgba(148, 163, 184, 0.08));
   }
 
   :global(.dark) .summary-band-anchor::after {
     background: #e2e8f0;
     box-shadow:
-      0 0 0 0.33rem rgba(15, 23, 42, 0.98),
-      0 0 0 0.44rem rgba(148, 163, 184, 0.08);
+      0 0 0 0.32rem rgba(15, 23, 42, 0.96),
+      0 0 0 0.5rem rgba(148, 163, 184, 0.08);
   }
 
   :global(.dark) .summary-band-peak .summary-band-anchor::after {
     background: #fbbf24;
     box-shadow:
-      0 0 0 0.33rem rgba(15, 23, 42, 0.98),
+      0 0 0 0.32rem rgba(15, 23, 42, 0.96),
       0 0 0 0.5rem rgba(245, 158, 11, 0.16);
   }
 
