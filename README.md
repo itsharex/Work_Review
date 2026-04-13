@@ -206,9 +206,8 @@ grim / gnome-screenshot / spectacle
 
 **Wayland 注意事项：**
 
-- 请以普通用户运行，**不要使用 `sudo`**。`sudo` 会导致 Wayland 环境变量丢失，截图工具无法连接 compositor，产生黑屏截图。
-- 如遇 `--no-sandbox` 提示，使用 `Work_Review --no-sandbox`（不加 sudo）。
-- 若数据目录（如 NTFS 挂载分区）权限不足，请通过 `chown` 或 `/etc/fstab` 的 `uid=` 挂载选项修复权限，而非用 sudo 运行。
+- 支持 `sudo` 运行（会自动恢复 Wayland/DBus 环境变量）。推荐优先以普通用户运行；如因数据目录权限等原因需使用 `sudo`，截图和窗口追踪仍可正常工作。
+- 如遇 `--no-sandbox` 提示，使用 `Work_Review --no-sandbox` 或 `sudo Work_Review --no-sandbox`。
 > Linux 下浏览器 URL 已恢复为**最佳努力链路**：
 > Firefox / Zen / LibreWolf / Waterfox 优先走 sessionstore；
 > Chromium 系仍主要依赖窗口标题提取与最近记录兜底，不等同于 macOS 的强能力采集。
