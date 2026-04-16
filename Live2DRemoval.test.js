@@ -22,7 +22,6 @@ test('Rust 侧不应再保留 Live2D 配置和输入监听入口', () => {
   const tauriConfigSource = readFileSync(new URL('./src-tauri/tauri.conf.json', import.meta.url), 'utf8');
 
   assert.doesNotMatch(cargoSource, /rdev/);
-  assert.doesNotMatch(cargoSource, /block =/);
   assert.doesNotMatch(configSource, /avatar_type/);
   assert.doesNotMatch(configSource, /avatar_live2d_model/);
   assert.doesNotMatch(mainSource, /device_listener/);

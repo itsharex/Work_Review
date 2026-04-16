@@ -1,6 +1,7 @@
 <script>
   import { onMount } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
+  import { listen } from '@tauri-apps/api/event';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
   import AvatarCanvas from '../../lib/components/Avatar/AvatarCanvas.svelte';
@@ -190,6 +191,7 @@
     let unlistenBubble = () => {};
     let unlistenInput = () => {};
     let unlistenMoved = () => {};
+    let unlistenLocaleChanged = () => {};
     initializeLocale();
     unsubscribeLocale = locale.subscribe((nextLocale) => {
       applyLocaleToDocument(nextLocale);
@@ -296,6 +298,13 @@
         }
       });
 
+      unlistenLocaleChanged = await listen('locale-changed', (event) => {
+        const nextLocale = event.payload;
+        if (typeof nextLocale === 'string' && nextLocale) {
+          initializeLocale(nextLocale);
+        }
+      });
+
       unlistenMoved = await nativeWindow.onMoved(({ payload: position }) => {
         scheduleAvatarPositionSave(position);
       });
@@ -313,6 +322,7 @@
       unlistenState();
       unlistenBubble();
       unlistenInput();
+      unlistenLocaleChanged();
       unlistenMoved();
     };
   });
