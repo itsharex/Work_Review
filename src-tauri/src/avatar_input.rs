@@ -211,13 +211,22 @@ impl LinuxAvatarInputSupport {
 #[cfg(target_os = "linux")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LinuxWaylandMouseProvider {
+    GnomeShellDbus,
     KdeKdotool,
     HyprlandHyprctl,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LinuxWaylandMouseSnapshot {
+    x: i32,
+    y: i32,
+    group_code: u8,
 }
 
 fn linux_avatar_input_support_for_session(
     session: crate::linux_session::LinuxDesktopSession,
     desktop_environment: crate::linux_session::LinuxDesktopEnvironment,
+    gnome_mouse_provider_available: bool,
     kde_mouse_provider_available: bool,
     hyprland_mouse_provider_available: bool,
 ) -> LinuxAvatarInputSupport {
@@ -226,11 +235,17 @@ fn linux_avatar_input_support_for_session(
     match session {
         LinuxDesktopSession::X11 => LinuxAvatarInputSupport::full("xinput2"),
         LinuxDesktopSession::Wayland => match desktop_environment {
+            LinuxDesktopEnvironment::Gnome if gnome_mouse_provider_available => {
+                LinuxAvatarInputSupport::mouse_only("gnome-shell-dbus")
+            }
             LinuxDesktopEnvironment::Kde if kde_mouse_provider_available => {
                 LinuxAvatarInputSupport::mouse_only("kdotool-mouselocation")
             }
             LinuxDesktopEnvironment::Hyprland if hyprland_mouse_provider_available => {
                 LinuxAvatarInputSupport::mouse_only("hyprctl-cursorpos")
+            }
+            LinuxDesktopEnvironment::Unknown if gnome_mouse_provider_available => {
+                LinuxAvatarInputSupport::mouse_only("gnome-shell-dbus")
             }
             LinuxDesktopEnvironment::Unknown if hyprland_mouse_provider_available => {
                 LinuxAvatarInputSupport::mouse_only("hyprctl-cursorpos")
@@ -315,6 +330,33 @@ fn linux_mouse_group_from_button_detail(detail: i32) -> u8 {
         2 | 8 | 9 => MOUSE_GROUP_SIDE,
         _ => MOUSE_GROUP_MOVE,
     }
+}
+
+fn mouse_group_code_from_label(value: &str) -> u8 {
+    match value.trim() {
+        "mouse-left" => MOUSE_GROUP_LEFT,
+        "mouse-right" => MOUSE_GROUP_RIGHT,
+        "mouse-side" => MOUSE_GROUP_SIDE,
+        "mouse-move" => MOUSE_GROUP_MOVE,
+        _ => MOUSE_GROUP_MOVE,
+    }
+}
+
+fn parse_gnome_avatar_input_dbus_output(output: &str) -> Option<LinuxWaylandMouseSnapshot> {
+    let json_start = output.find('{')?;
+    let json_end = output.rfind('}')?;
+    let payload = &output[json_start..=json_end];
+    let value: serde_json::Value = serde_json::from_str(payload).ok()?;
+
+    let x = value.get("x")?.as_i64()? as i32;
+    let y = value.get("y")?.as_i64()? as i32;
+    let group_code = value
+        .get("mouseGroup")
+        .and_then(|entry| entry.as_str())
+        .map(mouse_group_code_from_label)
+        .unwrap_or(MOUSE_GROUP_MOVE);
+
+    Some(LinuxWaylandMouseSnapshot { x, y, group_code })
 }
 
 fn parse_kdotool_mouse_location_output(output: &str) -> Option<(i32, i32)> {
@@ -407,6 +449,28 @@ fn is_kde_wayland_mouse_provider_available() -> bool {
 }
 
 #[cfg(target_os = "linux")]
+fn is_gnome_wayland_mouse_provider_available() -> bool {
+    run_linux_avatar_command_with_timeout(
+        std::process::Command::new("gdbus").args([
+            "call",
+            "--session",
+            "--dest",
+            "org.gnome.Shell",
+            "--object-path",
+            "/org/gnome/shell/extensions/WorkReviewAvatarInput",
+            "--method",
+            "org.gnome.shell.extensions.WorkReviewAvatarInput.GetPointer",
+        ]),
+        "gdbus WorkReviewAvatarInput.GetPointer",
+    )
+    .filter(|output| output.status.success())
+    .and_then(|output| {
+        parse_gnome_avatar_input_dbus_output(&String::from_utf8_lossy(&output.stdout))
+    })
+    .is_some()
+}
+
+#[cfg(target_os = "linux")]
 fn is_hyprland_wayland_mouse_provider_available() -> bool {
     run_linux_avatar_command_with_timeout(
         std::process::Command::new("hyprctl").arg("cursorpos"),
@@ -419,17 +483,24 @@ fn is_hyprland_wayland_mouse_provider_available() -> bool {
 #[cfg(target_os = "linux")]
 fn linux_wayland_mouse_provider_for_environment(
     desktop_environment: crate::linux_session::LinuxDesktopEnvironment,
+    gnome_mouse_provider_available: bool,
     kde_mouse_provider_available: bool,
     hyprland_mouse_provider_available: bool,
 ) -> Option<LinuxWaylandMouseProvider> {
     use crate::linux_session::LinuxDesktopEnvironment;
 
     match desktop_environment {
+        LinuxDesktopEnvironment::Gnome if gnome_mouse_provider_available => {
+            Some(LinuxWaylandMouseProvider::GnomeShellDbus)
+        }
         LinuxDesktopEnvironment::Kde if kde_mouse_provider_available => {
             Some(LinuxWaylandMouseProvider::KdeKdotool)
         }
         LinuxDesktopEnvironment::Hyprland if hyprland_mouse_provider_available => {
             Some(LinuxWaylandMouseProvider::HyprlandHyprctl)
+        }
+        LinuxDesktopEnvironment::Unknown if gnome_mouse_provider_available => {
+            Some(LinuxWaylandMouseProvider::GnomeShellDbus)
         }
         LinuxDesktopEnvironment::Unknown if hyprland_mouse_provider_available => {
             Some(LinuxWaylandMouseProvider::HyprlandHyprctl)
@@ -442,21 +513,51 @@ fn linux_wayland_mouse_provider_for_environment(
 }
 
 #[cfg(target_os = "linux")]
-fn query_wayland_mouse_cursor_point(provider: LinuxWaylandMouseProvider) -> Option<(i32, i32)> {
+fn query_wayland_mouse_cursor_point(
+    provider: LinuxWaylandMouseProvider,
+) -> Option<LinuxWaylandMouseSnapshot> {
     match provider {
+        LinuxWaylandMouseProvider::GnomeShellDbus => run_linux_avatar_command_with_timeout(
+            std::process::Command::new("gdbus").args([
+                "call",
+                "--session",
+                "--dest",
+                "org.gnome.Shell",
+                "--object-path",
+                "/org/gnome/shell/extensions/WorkReviewAvatarInput",
+                "--method",
+                "org.gnome.shell.extensions.WorkReviewAvatarInput.GetPointer",
+            ]),
+            "gdbus WorkReviewAvatarInput.GetPointer",
+        )
+        .and_then(|output| {
+            parse_gnome_avatar_input_dbus_output(&String::from_utf8_lossy(&output.stdout))
+        }),
         LinuxWaylandMouseProvider::KdeKdotool => run_linux_avatar_command_with_timeout(
             std::process::Command::new("kdotool").arg("getmouselocation"),
             "kdotool getmouselocation",
         )
         .and_then(|output| {
-            parse_kdotool_mouse_location_output(&String::from_utf8_lossy(&output.stdout))
+            parse_kdotool_mouse_location_output(&String::from_utf8_lossy(&output.stdout)).map(
+                |(x, y)| LinuxWaylandMouseSnapshot {
+                    x,
+                    y,
+                    group_code: MOUSE_GROUP_MOVE,
+                },
+            )
         }),
         LinuxWaylandMouseProvider::HyprlandHyprctl => run_linux_avatar_command_with_timeout(
             std::process::Command::new("hyprctl").arg("cursorpos"),
             "hyprctl cursorpos",
         )
         .and_then(|output| {
-            parse_hyprctl_cursorpos_output(&String::from_utf8_lossy(&output.stdout))
+            parse_hyprctl_cursorpos_output(&String::from_utf8_lossy(&output.stdout)).map(
+                |(x, y)| LinuxWaylandMouseSnapshot {
+                    x,
+                    y,
+                    group_code: MOUSE_GROUP_MOVE,
+                },
+            )
         }),
     }
 }
@@ -492,6 +593,7 @@ pub fn current_linux_avatar_input_support() -> LinuxAvatarInputSupport {
     linux_avatar_input_support_for_session(
         session,
         desktop_environment,
+        is_gnome_wayland_mouse_provider_available(),
         is_kde_wayland_mouse_provider_available(),
         is_hyprland_wayland_mouse_provider_available(),
     )
@@ -982,11 +1084,13 @@ pub fn start_avatar_input_monitor(app: &AppHandle) {
 
     let session = current_linux_desktop_session();
     let desktop_environment = current_linux_desktop_environment();
+    let gnome_mouse_provider_available = is_gnome_wayland_mouse_provider_available();
     let kde_mouse_provider_available = is_kde_wayland_mouse_provider_available();
     let hyprland_mouse_provider_available = is_hyprland_wayland_mouse_provider_available();
     let support = linux_avatar_input_support_for_session(
         session,
         desktop_environment,
+        gnome_mouse_provider_available,
         kde_mouse_provider_available,
         hyprland_mouse_provider_available,
     );
@@ -1125,6 +1229,7 @@ pub fn start_avatar_input_monitor(app: &AppHandle) {
         LinuxDesktopSession::Wayland => {
             let Some(provider) = linux_wayland_mouse_provider_for_environment(
                 desktop_environment,
+                gnome_mouse_provider_available,
                 kde_mouse_provider_available,
                 hyprland_mouse_provider_available,
             ) else {
@@ -1138,18 +1243,23 @@ pub fn start_avatar_input_monitor(app: &AppHandle) {
                 let mut last_point = None;
 
                 loop {
-                    if let Some((point_x, point_y)) = query_wayland_mouse_cursor_point(provider) {
-                        if last_point != Some((point_x, point_y)) {
-                            record_mouse_input(MOUSE_GROUP_MOVE);
-                            last_point = Some((point_x, point_y));
+                    if let Some(snapshot) = query_wayland_mouse_cursor_point(provider) {
+                        if last_point != Some((snapshot.x, snapshot.y)) {
+                            last_point = Some((snapshot.x, snapshot.y));
                         }
+                        record_mouse_input(snapshot.group_code);
 
                         if let Some((min_x, min_y, width, height)) =
                             virtual_desktop_bounds_from_monitors(&app)
                         {
                             let (cursor_ratio_x, cursor_ratio_y) =
                                 cursor_ratio_from_virtual_desktop_bounds(
-                                    point_x, point_y, min_x, min_y, width, height,
+                                    snapshot.x,
+                                    snapshot.y,
+                                    min_x,
+                                    min_y,
+                                    width,
+                                    height,
                                 );
                             record_cursor_ratio(cursor_ratio_x, cursor_ratio_y);
                         }
@@ -1317,6 +1427,7 @@ mod tests {
         let support = linux_avatar_input_support_for_session(
             LinuxDesktopSession::Wayland,
             LinuxDesktopEnvironment::Kde,
+            false,
             true,
             false,
         );
@@ -1332,6 +1443,7 @@ mod tests {
         let support = linux_avatar_input_support_for_session(
             LinuxDesktopSession::Wayland,
             LinuxDesktopEnvironment::Hyprland,
+            false,
             false,
             true,
         );
@@ -1349,6 +1461,7 @@ mod tests {
             LinuxDesktopEnvironment::Gnome,
             false,
             false,
+            false,
         );
 
         assert_eq!(support.support_level, "none");
@@ -1364,6 +1477,35 @@ mod tests {
             Some((1489, 812))
         );
         assert_eq!(parse_kdotool_mouse_location_output("x:abc y:812"), None);
+    }
+
+    #[test]
+    fn gnome_wayland在扩展可用时应识别为仅鼠标联动() {
+        let support = linux_avatar_input_support_for_session(
+            LinuxDesktopSession::Wayland,
+            LinuxDesktopEnvironment::Gnome,
+            true,
+            false,
+            false,
+        );
+
+        assert_eq!(support.support_level, "mouse-only");
+        assert_eq!(support.provider, "gnome-shell-dbus");
+        assert!(!support.keyboard_supported);
+        assert!(support.mouse_supported);
+    }
+
+    #[test]
+    fn gnome_avatar_input_dbus输出应解析为坐标与鼠标分组() {
+        let output = "('{\"x\":1489,\"y\":812,\"mouseGroup\":\"mouse-right\"}',)";
+        assert_eq!(
+            parse_gnome_avatar_input_dbus_output(output),
+            Some(LinuxWaylandMouseSnapshot {
+                x: 1489,
+                y: 812,
+                group_code: MOUSE_GROUP_RIGHT,
+            })
+        );
     }
 
     #[test]

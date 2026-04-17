@@ -180,6 +180,8 @@ Common Wayland providers / tools:
 ```bash
 # GNOME
 gdbus
+# Avatar mouse linkage also requires installing the bundled GNOME Shell extension:
+# scripts/gnome-shell/work-review-avatar-input@workreview.app
 
 # KDE Plasma
 kdotool

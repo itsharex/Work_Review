@@ -57,3 +57,22 @@ test('Linux 活动窗口检测应为 GNOME Wayland 单独提供 provider 分流'
   assert.match(source, /resolve_browser_url_for_window_linux/);
   assert.match(source, /firefox_family_session_store_url/);
 });
+
+test('GNOME Wayland 桌宠联动应内置专用扩展并通过 D-Bus 暴露指针信息', async () => {
+  const inputSource = await readFile(new URL('./src/avatar_input.rs', import.meta.url), 'utf8');
+  const metadata = await readFile(
+    new URL('../scripts/gnome-shell/work-review-avatar-input@workreview.app/metadata.json', import.meta.url),
+    'utf8'
+  );
+  const extensionSource = await readFile(
+    new URL('../scripts/gnome-shell/work-review-avatar-input@workreview.app/extension.js', import.meta.url),
+    'utf8'
+  );
+
+  assert.match(inputSource, /WorkReviewAvatarInput\.GetPointer/);
+  assert.match(inputSource, /gnome-shell-dbus/);
+  assert.match(metadata, /work-review-avatar-input@workreview\.app/);
+  assert.match(extensionSource, /global\.get_pointer\(\)/);
+  assert.match(extensionSource, /org\.gnome\.shell\.extensions\.WorkReviewAvatarInput/);
+  assert.match(extensionSource, /mouseGroup/);
+});
