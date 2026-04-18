@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.0.40] - 2026-04-17
+## [1.0.40] - 2026-04-18
 
 ### 新增
 - 为 GNOME Wayland 提供仓库内桌宠输入扩展，桌宠现在可以通过 D-Bus 获取最近一次按键与鼠标状态。
@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 修复 Linux X11 下桌宠缺少全局键鼠监听的问题，恢复完整键盘与鼠标联动。
 - 修复 KDE / Hyprland Wayland 下桌宠输入能力不透明的问题，当前会按实际能力标记为“仅鼠标移动”。
 - 修复 GNOME Wayland 下桌宠长期缺少可用输入链的问题，当前已支持鼠标联动与最近一次键盘按下联动。
+- 修复 GNOME 扩展安装后状态不透明的问题：当扩展已启用但当前 Shell 尚未加载最新版本时，会明确提示重新登录后再试。
 
 ## [1.0.39] - 2026-04-16
 
