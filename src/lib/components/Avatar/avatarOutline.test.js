@@ -110,27 +110,30 @@ test('桌宠路径不应复用全局 outline 类名，避免 SVG 包围框泄漏
   assert.match(engineSource, /const AVATAR_WINDOW_MARGIN: f64 = 8\.0;/);
 });
 
-test('状态气泡应悬浮在猫头上方，采用紧凑气泡而不是横条', () => {
+test('状态气泡应采用贴头短气泡，减少白卡感和视觉侵入', () => {
   const source = readFileSync(new URL('./AvatarPopover.svelte', import.meta.url), 'utf8');
   const windowSource = readFileSync(new URL('../../../routes/avatar/AvatarWindow.svelte', import.meta.url), 'utf8');
 
   assert.doesNotMatch(source, /Array\.from\(bubble\.message\.replace\(\/\\s\+\/g, ''\)\)/);
-  assert.match(source, /style="right: 10%; top: 6%;"/);
+  assert.match(source, /class="avatar-popover-anchor absolute right-\[8%\] top-\[8px\]"/);
   assert.doesNotMatch(source, /writing-mode: vertical-rl/);
-  assert.match(source, /width: fit-content/);
-  assert.match(source, /max-width: min\(62vw, 228px\)/);
-  assert.match(source, /min-width: 118px/);
-  assert.match(source, /display: inline-flex;/);
-  assert.match(source, /background:\s*rgba\(255,\s*255,\s*255,\s*0\.96\)/);
-  assert.match(source, /color:\s*rgb\(15,\s*23,\s*42\)/);
-  assert.match(source, /linear-gradient\(180deg,\s*rgba\(236,\s*253,\s*245,\s*0\.98\),\s*rgba\(209,\s*250,\s*229,\s*0\.95\)\)/);
-  assert.match(source, /shadow-\[0_8px_22px_rgba\(15,23,42,0\.12\),0_2px_8px_rgba\(15,23,42,0\.08\)\]/);
-  assert.match(source, /innerPanelStyle/);
-  assert.match(source, /text-\[13px\] font-medium leading-\[1\.45\] tracking-\[0\.01em\]/);
-  assert.match(source, /rounded-\[20px\]/);
-  assert.match(source, /overflow-wrap: anywhere/);
-  assert.match(source, /white-space: pre-wrap/);
+  assert.match(source, /compactBubbleMessage/);
+  assert.match(source, /bubblePanelStyle = compactBubbleMessage/);
+  assert.match(source, /width: fit-content; min-width: 120px; max-width: min\(68vw, 196px\);/);
+  assert.match(source, /width: min\(76vw, 236px\); min-width: 168px; max-width: min\(76vw, 236px\);/);
+  assert.match(source, /min-height: 40px/);
+  assert.match(source, /padding: 6px 14px 7px 14px/);
+  assert.match(source, /display: block;/);
+  assert.match(source, /text-\[12px\] font-semibold leading-\[1\.35\]/);
+  assert.match(source, /rounded-\[16px\]/);
+  assert.match(source, /shadow-\[0_10px_24px_rgba\(15,23,42,0\.1\),0_3px_10px_rgba\(15,23,42,0\.05\)\]/);
+  assert.match(source, /word-break: keep-all/);
+  assert.match(source, /overflow-wrap: normal/);
+  assert.match(source, /white-space: normal/);
+  assert.match(source, /line-break: strict/);
+  assert.match(source, /text-align: \{compactBubbleMessage \? 'center' : 'left'\}/);
   assert.match(source, /bubble-tail/);
+  assert.match(source, /bubble-tail-dot/);
   assert.match(windowSource, /h-\[86px\]/);
   assert.match(windowSource, /top-\[78px\]/);
   assert.match(windowSource, /class="h-full w-\[82%\]"/);
@@ -144,9 +147,11 @@ test('休息提醒气泡应支持常驻显示和手动关闭', () => {
   assert.match(source, /export let onClose = \(\) => \{\};/);
   assert.match(source, /bubble\?\.persistent/);
   assert.match(source, /class="absolute inset-0 z-20 overflow-visible pointer-events-none"/);
-  assert.match(source, /class="pointer-events-auto relative rounded-\[20px\]/);
+  assert.match(source, /class="pointer-events-auto relative rounded-\[16px\]/);
   assert.match(source, /<button[\s\S]*type="button"[\s\S]*on:click=\{onClose\}/);
   assert.match(source, /aria-label="关闭提醒"/);
+  assert.match(source, /class="absolute inset-0 rounded-\[16px\]"/);
+  assert.match(source, /class="bubble-tail-dot absolute/);
   assert.match(windowSource, /<AvatarPopover \{bubble\} onClose=\{dismissBubble\} \/>/);
   assert.match(windowSource, /if \(!payload\?\.persistent\)/);
 });
@@ -156,4 +161,42 @@ test('英文桌宠气泡文案应保留单词间空格', () => {
     formatBubbleMessage('Time for a break. Stand up and stretch a bit.'),
     'Time for a break. Stand up and stretch a bit.'
   );
+});
+
+test('接上次继续卡片应保留可操作结构，但与轻气泡共用圆角和尾巴语言', () => {
+  const source = readFileSync(new URL('./AvatarFollowupCard.svelte', import.meta.url), 'utf8');
+  const windowSource = readFileSync(new URL('../../../routes/avatar/AvatarWindow.svelte', import.meta.url), 'utf8');
+
+  assert.match(source, /w-\[min\(84vw,292px\)\]/);
+  assert.match(source, /max-w-\[292px\]/);
+  assert.match(source, /flex-col overflow-hidden/);
+  assert.match(source, /style="max-height: calc\(100vh - 16px\);"/);
+  assert.match(source, /min-h-0 flex-1 overflow-y-auto pr-1/);
+  assert.match(source, /mt-3 shrink-0 space-y-2/);
+  assert.match(source, /rounded-\[16px\]/);
+  assert.match(source, /bg-\[rgba\(255,255,255,0\.96\)\]/);
+  assert.match(source, /shadow-\[0_14px_28px_rgba\(15,23,42,0\.14\),0_4px_12px_rgba\(15,23,42,0\.07\)\]/);
+  assert.match(source, /copy\.surfaceClass/);
+  assert.match(source, /copy\.badgeClass/);
+  assert.match(source, /copy\.primaryClass/);
+  assert.match(source, /shrink-0 whitespace-nowrap/);
+  assert.match(source, /grid grid-cols-\[auto,minmax\(0,1fr\)\] items-start gap-2 pr-7/);
+  assert.match(source, /CLAMP_STYLE_TWO_LINES/);
+  assert.match(source, /CLAMP_STYLE_FOUR_LINES/);
+  assert.match(source, /followup-tail/);
+  assert.match(source, /grid grid-cols-3 gap-2/);
+  assert.match(source, /border border-slate-200 bg-white/);
+  assert.match(source, /inline-flex w-full items-center justify-center/);
+  assert.match(windowSource, /truncateFollowupTitle/);
+  assert.match(
+    windowSource,
+    /<AvatarFollowupCard[\s\S]*followup=\{followup\}[\s\S]*onDismiss=\{dismissFollowup\}[\s\S]*\/>/
+  );
+});
+
+test('桌宠键盘反馈应恢复单键模式，不再显示组合键提示浮层', () => {
+  const source = readFileSync(new URL('./AvatarCanvas.svelte', import.meta.url), 'utf8');
+
+  assert.doesNotMatch(source, /keyboard-combo-indicator/);
+  assert.doesNotMatch(source, /keyboard-combo-chip/);
 });

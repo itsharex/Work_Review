@@ -1479,6 +1479,10 @@
   gap: 1rem;
 }
 
+.settings-top-status-zone {
+  padding: 1rem 1.05rem;
+}
+
 .settings-stage-layout {
   display: grid;
   grid-template-columns: 12.5rem minmax(0, 1fr);

@@ -42,7 +42,9 @@
   let currentTime = new Date();
   let clockInterval;
   let handleVisibilityChange;
+  let handleTimelineFocus;
   let appIcons = {};
+  const DATE_PARAM_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 
   // LRU 缓存：防止长时间运行内存无限增长
   // 缩略图 ~80KB/条，60 条 ≈ 5MB；高清图 ~300KB/条，20 条 ≈ 6MB
@@ -75,6 +77,34 @@
   }
 
   const unsubIcons = appIconStore.subscribe(v => appIcons = v);
+
+  function readRequestedTimelineDate() {
+    if (typeof window === 'undefined') {
+      return null;
+    }
+
+    const nextDate = new URLSearchParams(window.location.search).get('date');
+    return nextDate && DATE_PARAM_PATTERN.test(nextDate) ? nextDate : null;
+  }
+
+  function applyTimelineFocus(payload) {
+    const nextDate =
+      typeof payload?.date === 'string' && DATE_PARAM_PATTERN.test(payload.date)
+        ? payload.date
+        : null;
+
+    if (!nextDate) {
+      return;
+    }
+
+    selectedActivity = null;
+    if (selectedDate === nextDate) {
+      loadTimeline();
+      return;
+    }
+
+    selectedDate = nextDate;
+  }
 
   // 分类元数据（从 store 动态获取，支持自定义分类）
   let categorySaving = false;
@@ -625,6 +655,13 @@
   $: isToday = selectedDate === getLocalDateString();
 
   onMount(async () => {
+    const requestedDate = readRequestedTimelineDate();
+    if (requestedDate) {
+      selectedDate = requestedDate;
+    }
+
+    handleTimelineFocus = (event) => applyTimelineFocus(event.detail);
+    window.addEventListener('timeline-focus-date', handleTimelineFocus);
     categoryStore.refresh();
 
     if (!document.hidden) {
@@ -663,12 +700,14 @@
         cache.invalidate('overview');
       }
     });
+
   });
 
   onDestroy(() => {
     if (unlisten) unlisten();
     if (clockInterval) clearInterval(clockInterval);
     if (handleVisibilityChange) document.removeEventListener('visibilitychange', handleVisibilityChange);
+    if (handleTimelineFocus) window.removeEventListener('timeline-focus-date', handleTimelineFocus);
     unsubIcons();
   });
 </script>

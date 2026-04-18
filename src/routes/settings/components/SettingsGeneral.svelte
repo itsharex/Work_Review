@@ -2,6 +2,7 @@
   import { createEventDispatcher, onMount } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
   import { formatDurationLocalized, locale, t } from '$lib/i18n/index.js';
+  import SettingsAppearance from './SettingsAppearance.svelte';
 
   export let config;
 
@@ -225,5 +226,8 @@
         <span class="switch-thumb {config.lightweight_mode ? 'translate-x-5' : 'translate-x-0'}"></span>
       </button>
     </div>
+
   </div>
 </div>
+
+<SettingsAppearance bind:config mode="background-only" on:change={handleChange} />

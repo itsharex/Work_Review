@@ -397,6 +397,40 @@ const CONTEXT_BUBBLE_MESSAGES = {
   },
 };
 
+const PERSONA_MODE_BUBBLES = {
+  companion: {
+    idle: { 'zh-CN': '先歇一会', 'zh-TW': '先休息一下', en: 'Take a breather' },
+    working: { 'zh-CN': '陪你推进', 'zh-TW': '陪你推進', en: 'I am with you' },
+    reading: { 'zh-CN': '一起看看', 'zh-TW': '一起看看', en: 'Let us read' },
+    meeting: { 'zh-CN': '先听你聊', 'zh-TW': '先聽你聊', en: 'I am listening' },
+    generating: { 'zh-CN': '我在整理', 'zh-TW': '我在整理', en: 'I am on it' },
+    slacking: { 'zh-CN': '放松一下', 'zh-TW': '放鬆一下', en: 'Take it easy' },
+  },
+  coach: {
+    idle: { 'zh-CN': '先恢复状态', 'zh-TW': '先恢復狀態', en: 'Reset first' },
+    working: { 'zh-CN': '继续推进', 'zh-TW': '繼續推進', en: 'Keep moving' },
+    reading: { 'zh-CN': '把要点看完', 'zh-TW': '把重點看完', en: 'Finish the key points' },
+    meeting: { 'zh-CN': '抓住结论', 'zh-TW': '抓住結論', en: 'Catch the decision' },
+    generating: { 'zh-CN': '马上出结果', 'zh-TW': '馬上出結果', en: 'Result incoming' },
+    slacking: { 'zh-CN': '休息后再冲', 'zh-TW': '休息後再衝', en: 'Break, then sprint' },
+  },
+};
+
+const PERSONA_CONTEXT_BUBBLES = {
+  companion: {
+    编码中: { 'zh-CN': '陪你编码', 'zh-TW': '陪你寫碼', en: 'Coding together' },
+    写作中: { 'zh-CN': '陪你写完', 'zh-TW': '陪你寫完', en: 'Writing together' },
+    调研中: { 'zh-CN': '陪你查一查', 'zh-TW': '陪你查一查', en: 'Researching with you' },
+    开会中: { 'zh-CN': '我先陪你听', 'zh-TW': '我先陪你聽', en: 'Listening with you' },
+  },
+  coach: {
+    编码中: { 'zh-CN': '先把这段写完', 'zh-TW': '先把這段寫完', en: 'Finish this block' },
+    写作中: { 'zh-CN': '先把这段收住', 'zh-TW': '先把這段收住', en: 'Close this section' },
+    调研中: { 'zh-CN': '先拿到结论', 'zh-TW': '先拿到結論', en: 'Get the answer first' },
+    开会中: { 'zh-CN': '先抓重点', 'zh-TW': '先抓重點', en: 'Catch the key point' },
+  },
+};
+
 function resolveContextBubbleKey(contextLabel = '') {
   if (!contextLabel) {
     return '';
@@ -890,7 +924,7 @@ export function getAvatarModeMeta(mode, contextLabel = '') {
   };
 }
 
-export function getAvatarStateBubble(mode, locale = 'zh-CN', contextLabel = '') {
+export function getAvatarStateBubble(mode, locale = 'zh-CN', contextLabel = '', persona = 'assistant') {
   const messageSet = STATE_BUBBLES[mode];
   if (!messageSet) {
     return null;
@@ -903,10 +937,24 @@ export function getAvatarStateBubble(mode, locale = 'zh-CN', contextLabel = '') 
 
   const contextKey = resolveContextBubbleKey(contextLabel);
   if (!contextKey) {
-    return baseBubble;
+    const personaModeMessage =
+      PERSONA_MODE_BUBBLES[persona]?.[mode]?.[locale]
+      || PERSONA_MODE_BUBBLES[persona]?.[mode]?.['zh-CN'];
+
+    if (!personaModeMessage) {
+      return baseBubble;
+    }
+
+    return {
+      ...baseBubble,
+      message: personaModeMessage,
+    };
   }
 
-  const localizedContext = CONTEXT_BUBBLE_MESSAGES[contextKey]?.[locale]
+  const localizedContext =
+    PERSONA_CONTEXT_BUBBLES[persona]?.[contextKey]?.[locale]
+    || PERSONA_CONTEXT_BUBBLES[persona]?.[contextKey]?.['zh-CN']
+    || CONTEXT_BUBBLE_MESSAGES[contextKey]?.[locale]
     || CONTEXT_BUBBLE_MESSAGES[contextKey]?.['zh-CN']
     || contextKey;
 

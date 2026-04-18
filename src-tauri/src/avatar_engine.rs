@@ -39,6 +39,7 @@ pub struct AvatarStatePayload {
     pub is_generating_report: bool,
     pub avatar_opacity: f64,
     pub avatar_preset: String,
+    pub avatar_persona: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -47,7 +48,11 @@ pub struct AvatarInputPayload {
     pub keyboard_active: bool,
     pub mouse_active: bool,
     pub keyboard_group: String,
+    #[serde(default)]
+    pub keyboard_groups: Vec<String>,
     pub keyboard_visual_key: String,
+    #[serde(default)]
+    pub keyboard_visual_keys: Vec<String>,
     pub mouse_group: String,
     pub cursor_ratio_x: f64,
     pub cursor_ratio_y: f64,
@@ -120,6 +125,7 @@ pub fn default_avatar_state() -> AvatarStatePayload {
         is_generating_report: false,
         avatar_opacity: AVATAR_OPACITY_DEFAULT,
         avatar_preset: AVATAR_PRESET_DEFAULT.to_string(),
+        avatar_persona: "assistant".to_string(),
     }
 }
 
@@ -171,6 +177,7 @@ pub fn derive_avatar_state_with_rules(
             is_generating_report: true,
             avatar_opacity: AVATAR_OPACITY_DEFAULT,
             avatar_preset: AVATAR_PRESET_DEFAULT.to_string(),
+            avatar_persona: "assistant".to_string(),
         };
     }
 
@@ -184,6 +191,7 @@ pub fn derive_avatar_state_with_rules(
             is_generating_report: false,
             avatar_opacity: AVATAR_OPACITY_DEFAULT,
             avatar_preset: AVATAR_PRESET_DEFAULT.to_string(),
+            avatar_persona: "assistant".to_string(),
         };
     }
 
@@ -363,12 +371,17 @@ pub fn apply_avatar_visual_settings(
     mut payload: AvatarStatePayload,
     opacity: f64,
     preset: &str,
+    persona: &str,
 ) -> AvatarStatePayload {
     payload.avatar_opacity = opacity;
     payload.avatar_preset = if preset.trim().is_empty() {
         AVATAR_PRESET_DEFAULT.to_string()
     } else {
         preset.trim().to_string()
+    };
+    payload.avatar_persona = match persona.trim() {
+        "companion" | "coach" => persona.trim().to_string(),
+        _ => "assistant".to_string(),
     };
     payload
 }
@@ -380,15 +393,21 @@ pub fn sync_avatar_window(
     saved_position: Option<(i32, i32)>,
 ) -> tauri::Result<()> {
     if enabled {
+        let had_existing_window = app.get_webview_window(AVATAR_WINDOW_LABEL).is_some();
         ensure_avatar_window(app, scale)?;
         if let Some(window) = app.get_webview_window(AVATAR_WINDOW_LABEL) {
             let normalized_scale = normalize_avatar_scale(scale);
-            let current_position = window
-                .outer_position()
-                .ok()
-                .map(|position| (position.x, position.y));
-            let (x, y) =
-                default_avatar_position(app, normalized_scale, current_position.or(saved_position));
+            let current_position = if had_existing_window {
+                window
+                    .outer_position()
+                    .ok()
+                    .map(|position| (position.x, position.y))
+            } else {
+                None
+            };
+            let effective_position =
+                remembered_avatar_position(had_existing_window, current_position, saved_position);
+            let (x, y) = default_avatar_position(app, normalized_scale, effective_position);
             resize_avatar_window(&window, normalized_scale);
             let _ = window.set_always_on_top(true);
             let _ = window.set_visible_on_all_workspaces(true);
@@ -402,6 +421,18 @@ pub fn sync_avatar_window(
     }
 
     Ok(())
+}
+
+fn remembered_avatar_position(
+    had_existing_window: bool,
+    current_position: Option<(i32, i32)>,
+    saved_position: Option<(i32, i32)>,
+) -> Option<(i32, i32)> {
+    if had_existing_window {
+        current_position.or(saved_position)
+    } else {
+        saved_position
+    }
 }
 
 pub fn emit_avatar_state(app: &AppHandle, payload: &AvatarStatePayload) {
@@ -618,6 +649,7 @@ fn avatar_state(
         is_generating_report: false,
         avatar_opacity: AVATAR_OPACITY_DEFAULT,
         avatar_preset: AVATAR_PRESET_DEFAULT.to_string(),
+        avatar_persona: "assistant".to_string(),
     }
 }
 
@@ -625,8 +657,8 @@ fn avatar_state(
 mod tests {
     use super::{
         avatar_window_size, clamp_avatar_position, default_avatar_state, derive_avatar_state,
-        derive_avatar_state_with_rules, resolve_avatar_position, Rect, AVATAR_WINDOW_HEIGHT,
-        AVATAR_WINDOW_WIDTH,
+        derive_avatar_state_with_rules, remembered_avatar_position, resolve_avatar_position, Rect,
+        AVATAR_WINDOW_HEIGHT, AVATAR_WINDOW_WIDTH,
     };
     use crate::config::AppCategoryRule;
 
@@ -877,5 +909,19 @@ mod tests {
                 720 - AVATAR_WINDOW_HEIGHT as i32
             )
         );
+    }
+
+    #[test]
+    fn 首次创建桌宠窗口时不应误用占位坐标() {
+        let position = remembered_avatar_position(false, Some((40, 40)), None);
+
+        assert_eq!(position, None);
+    }
+
+    #[test]
+    fn 已存在桌宠窗口时应优先保持当前位置() {
+        let position = remembered_avatar_position(true, Some((640, 520)), Some((120, 240)));
+
+        assert_eq!(position, Some((640, 520)));
     }
 }

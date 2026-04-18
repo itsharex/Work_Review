@@ -1,5 +1,7 @@
 use crate::avatar_engine::AvatarInputPayload;
+use once_cell::sync::Lazy;
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, AtomicU8, Ordering};
+use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::AppHandle;
 
@@ -15,6 +17,8 @@ static CURSOR_RATIO_X_PERMILLE: AtomicU32 = AtomicU32::new(500);
 static CURSOR_RATIO_Y_PERMILLE: AtomicU32 = AtomicU32::new(500);
 static INPUT_BRIDGE_STARTED: AtomicBool = AtomicBool::new(false);
 static INPUT_MONITOR_STARTED: AtomicBool = AtomicBool::new(false);
+static KEYBOARD_STATE: Lazy<Mutex<KeyboardInputState>> =
+    Lazy::new(|| Mutex::new(KeyboardInputState::default()));
 
 const KEYBOARD_GROUP_DIGIT_1: u8 = 1;
 const KEYBOARD_GROUP_DIGIT_2: u8 = 2;
@@ -37,8 +41,20 @@ const MOUSE_GROUP_LEFT: u8 = 2;
 const MOUSE_GROUP_RIGHT: u8 = 3;
 const MOUSE_GROUP_SIDE: u8 = 4;
 const INPUT_BRIDGE_POLL_INTERVAL: Duration = Duration::from_millis(16);
+const PRESSED_KEY_STALE_MS: u64 = KEYBOARD_ACTIVE_WINDOW_MS;
 #[cfg(target_os = "linux")]
 const WAYLAND_MOUSE_POLL_INTERVAL: Duration = Duration::from_millis(120);
+
+#[derive(Default)]
+struct KeyboardInputState {
+    pressed_keys: Vec<PressedKeyState>,
+}
+
+#[derive(Clone, Copy)]
+struct PressedKeyState {
+    key_code: u16,
+    pressed_at_ms: u64,
+}
 
 fn now_ms() -> u64 {
     SystemTime::now()
@@ -49,6 +65,48 @@ fn now_ms() -> u64 {
 
 fn is_input_still_active(last_input_at_ms: u64, now_ms: u64, active_window_ms: u64) -> bool {
     last_input_at_ms > 0 && now_ms.saturating_sub(last_input_at_ms) <= active_window_ms
+}
+
+fn normalize_keyboard_visual_keys(key_codes: &[u16]) -> Vec<String> {
+    let mut result = Vec::new();
+
+    for key_code in key_codes.iter().rev() {
+        let visual_key = keyboard_visual_key_from_key_code(*key_code);
+        if visual_key.is_empty() || result.iter().any(|item| item == visual_key) {
+            continue;
+        }
+        result.push(visual_key.to_string());
+    }
+
+    result
+}
+
+fn normalize_keyboard_groups(key_codes: &[u16]) -> Vec<String> {
+    let mut result = Vec::new();
+
+    for key_code in key_codes.iter().rev() {
+        let group_code = standard_keyboard_group_from_key_code(*key_code);
+        let group_label = keyboard_group_label(group_code);
+        if group_label == "idle" || result.iter().any(|item| item == group_label) {
+            continue;
+        }
+        result.push(group_label.to_string());
+    }
+
+    result
+}
+
+fn current_keyboard_key_codes(now_ms: u64) -> Vec<u16> {
+    let mut state = KEYBOARD_STATE.lock().unwrap_or_else(|e| e.into_inner());
+    state
+        .pressed_keys
+        .retain(|item| now_ms.saturating_sub(item.pressed_at_ms) <= PRESSED_KEY_STALE_MS);
+
+    state
+        .pressed_keys
+        .iter()
+        .map(|item| item.key_code)
+        .collect()
 }
 
 fn keyboard_group_label(code: u8) -> &'static str {
@@ -742,12 +800,22 @@ unsafe extern "system" fn windows_keyboard_hook_proc(
     l_param: isize,
 ) -> isize {
     use std::ptr;
-    use winapi::um::winuser::{CallNextHookEx, KBDLLHOOKSTRUCT, WM_KEYDOWN, WM_SYSKEYDOWN};
+    use winapi::um::winuser::{
+        CallNextHookEx, KBDLLHOOKSTRUCT, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
+    };
 
-    if code >= 0 && (w_param as u32 == WM_KEYDOWN || w_param as u32 == WM_SYSKEYDOWN) {
+    if code >= 0 {
         let keyboard_info = &*(l_param as *const KBDLLHOOKSTRUCT);
         if let Some(key_code) = windows_virtual_key_to_avatar_key_code(keyboard_info.vkCode) {
-            record_keyboard_input(standard_keyboard_group_from_key_code(key_code), key_code);
+            match w_param as u32 {
+                WM_KEYDOWN | WM_SYSKEYDOWN => {
+                    record_keyboard_input(standard_keyboard_group_from_key_code(key_code), key_code);
+                }
+                WM_KEYUP | WM_SYSKEYUP => {
+                    release_keyboard_input(key_code);
+                }
+                _ => {}
+            }
         }
     }
 
@@ -843,16 +911,28 @@ pub(crate) fn build_avatar_input_payload(now_ms: u64) -> AvatarInputPayload {
     let keyboard_group_code = LAST_KEYBOARD_GROUP_CODE.load(Ordering::Relaxed);
     let keyboard_key_code = LAST_KEYBOARD_KEY_CODE.load(Ordering::Relaxed);
     let mouse_group_code = LAST_MOUSE_GROUP_CODE.load(Ordering::Relaxed);
+    let keyboard_key_codes = current_keyboard_key_codes(now_ms);
+    let keyboard_groups = normalize_keyboard_groups(&keyboard_key_codes);
+    let keyboard_visual_keys = normalize_keyboard_visual_keys(&keyboard_key_codes);
+    let keyboard_is_pressed = !keyboard_key_codes.is_empty();
+    let keyboard_active =
+        keyboard_is_pressed || is_input_still_active(last_keyboard_input_at_ms, now_ms, KEYBOARD_ACTIVE_WINDOW_MS);
+    let primary_keyboard_group = keyboard_groups
+        .first()
+        .cloned()
+        .unwrap_or_else(|| keyboard_group_label(keyboard_group_code).to_string());
+    let primary_keyboard_visual_key = keyboard_visual_keys
+        .first()
+        .cloned()
+        .unwrap_or_else(|| keyboard_visual_key_from_key_code(keyboard_key_code).to_string());
 
     AvatarInputPayload {
-        keyboard_active: is_input_still_active(
-            last_keyboard_input_at_ms,
-            now_ms,
-            KEYBOARD_ACTIVE_WINDOW_MS,
-        ),
+        keyboard_active,
         mouse_active: is_input_still_active(last_mouse_input_at_ms, now_ms, MOUSE_ACTIVE_WINDOW_MS),
-        keyboard_group: keyboard_group_label(keyboard_group_code).to_string(),
-        keyboard_visual_key: keyboard_visual_key_from_key_code(keyboard_key_code).to_string(),
+        keyboard_group: primary_keyboard_group,
+        keyboard_groups,
+        keyboard_visual_key: primary_keyboard_visual_key,
+        keyboard_visual_keys,
         mouse_group: mouse_group_label(mouse_group_code).to_string(),
         cursor_ratio_x: CURSOR_RATIO_X_PERMILLE.load(Ordering::Relaxed) as f64 / 1000.0,
         cursor_ratio_y: CURSOR_RATIO_Y_PERMILLE.load(Ordering::Relaxed) as f64 / 1000.0,
@@ -862,9 +942,36 @@ pub(crate) fn build_avatar_input_payload(now_ms: u64) -> AvatarInputPayload {
 }
 
 pub(crate) fn record_keyboard_input(group_code: u8, key_code: u16) {
-    LAST_KEYBOARD_INPUT_AT_MS.store(now_ms(), Ordering::Relaxed);
+    let pressed_at_ms = now_ms();
+    {
+        let mut state = KEYBOARD_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        state.pressed_keys.retain(|existing| existing.key_code != key_code);
+        state.pressed_keys.push(PressedKeyState {
+            key_code,
+            pressed_at_ms,
+        });
+    }
+    LAST_KEYBOARD_INPUT_AT_MS.store(pressed_at_ms, Ordering::Relaxed);
     LAST_KEYBOARD_GROUP_CODE.store(group_code, Ordering::Relaxed);
     LAST_KEYBOARD_KEY_CODE.store(key_code, Ordering::Relaxed);
+}
+
+pub(crate) fn release_keyboard_input(key_code: u16) {
+    let next_primary = {
+        let mut state = KEYBOARD_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        state.pressed_keys.retain(|existing| existing.key_code != key_code);
+        state.pressed_keys.last().copied()
+    };
+
+    LAST_KEYBOARD_INPUT_AT_MS.store(now_ms(), Ordering::Relaxed);
+
+    if let Some(primary_key_state) = next_primary {
+        LAST_KEYBOARD_GROUP_CODE.store(
+            standard_keyboard_group_from_key_code(primary_key_state.key_code),
+            Ordering::Relaxed,
+        );
+        LAST_KEYBOARD_KEY_CODE.store(primary_key_state.key_code, Ordering::Relaxed);
+    }
 }
 
 pub(crate) fn record_mouse_input(group_code: u8) {
@@ -963,6 +1070,21 @@ pub fn start_avatar_input_monitor(app: &AppHandle) {
         (x_ratio, y_ratio)
     }
 
+    unsafe fn is_macos_modifier_key_pressed(event: id, key_code: u16) -> Option<bool> {
+        let modifier_flags: u64 = msg_send![event, modifierFlags];
+        let active = match key_code {
+            55 | 54 => modifier_flags & (1 << 20) != 0,
+            56 | 60 => modifier_flags & (1 << 17) != 0,
+            58 | 61 => modifier_flags & (1 << 19) != 0,
+            59 | 62 => modifier_flags & (1 << 18) != 0,
+            57 => modifier_flags & (1 << 16) != 0,
+            63 => modifier_flags & (1 << 23) != 0,
+            _ => return None,
+        };
+
+        Some(active)
+    }
+
     if INPUT_MONITOR_STARTED.load(Ordering::SeqCst) {
         return;
     }
@@ -989,8 +1111,26 @@ pub fn start_avatar_input_monitor(app: &AppHandle) {
 
             let event_class = class!(NSEvent);
             let keyboard_handler = ConcreteBlock::new(|event: id| {
+                let event_type_raw: usize = msg_send![event, type];
+                let event_type = std::mem::transmute::<usize, NSEventType>(event_type_raw);
                 let key_code: u16 = msg_send![event, keyCode];
-                record_keyboard_input(standard_keyboard_group_from_key_code(key_code), key_code);
+                match event_type {
+                    NSEventType::NSKeyUp => release_keyboard_input(key_code),
+                    NSEventType::NSFlagsChanged => {
+                        if is_macos_modifier_key_pressed(event, key_code).unwrap_or(true) {
+                            record_keyboard_input(
+                                standard_keyboard_group_from_key_code(key_code),
+                                key_code,
+                            );
+                        } else {
+                            release_keyboard_input(key_code);
+                        }
+                    }
+                    _ => record_keyboard_input(
+                        standard_keyboard_group_from_key_code(key_code),
+                        key_code,
+                    ),
+                }
             })
             .copy();
             let mouse_handler = ConcreteBlock::new(|event: id| {
@@ -1002,8 +1142,10 @@ pub fn start_avatar_input_monitor(app: &AppHandle) {
             })
             .copy();
 
-            let keyboard_mask =
-                (NSEventMask::NSKeyDownMask | NSEventMask::NSFlagsChangedMask).bits();
+            let keyboard_mask = (NSEventMask::NSKeyDownMask
+                | NSEventMask::NSKeyUpMask
+                | NSEventMask::NSFlagsChangedMask)
+                .bits();
             let mouse_mask = (NSEventMask::NSLeftMouseDownMask
                 | NSEventMask::NSRightMouseDownMask
                 | NSEventMask::NSOtherMouseDownMask
@@ -1178,6 +1320,7 @@ pub fn start_avatar_input_monitor(app: &AppHandle) {
 
                 let mut mask = [0_u8; 4];
                 xinput2::XISetMask(&mut mask, xinput2::XI_RawKeyPress);
+                xinput2::XISetMask(&mut mask, xinput2::XI_RawKeyRelease);
                 xinput2::XISetMask(&mut mask, xinput2::XI_RawButtonPress);
                 xinput2::XISetMask(&mut mask, xinput2::XI_RawMotion);
 
@@ -1223,6 +1366,14 @@ pub fn start_avatar_input_monitor(app: &AppHandle) {
                                     standard_keyboard_group_from_key_code(key_code),
                                     key_code,
                                 );
+                            }
+                        }
+                        xinput2::XI_RawKeyRelease => {
+                            let raw_event = &*(cookie.data as *const xinput2::XIRawEvent);
+                            let keysym =
+                                xlib::XkbKeycodeToKeysym(display, raw_event.detail as u8, 0, 0);
+                            if let Some(key_code) = linux_keysym_to_avatar_key_code(keysym as u64) {
+                                release_keyboard_input(key_code);
                             }
                         }
                         xinput2::XI_RawButtonPress => {
@@ -1317,9 +1468,32 @@ pub fn start_avatar_input_monitor(_app: &AppHandle) {}
 mod tests {
     use super::*;
     use crate::linux_session::{LinuxDesktopEnvironment, LinuxDesktopSession};
+    use std::sync::{Mutex, MutexGuard};
+
+    static AVATAR_INPUT_TEST_MUTEX: Mutex<()> = Mutex::new(());
+
+    fn reset_avatar_input_test_state() -> MutexGuard<'static, ()> {
+        let guard = AVATAR_INPUT_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        LAST_KEYBOARD_INPUT_AT_MS.store(0, Ordering::Relaxed);
+        LAST_MOUSE_INPUT_AT_MS.store(0, Ordering::Relaxed);
+        LAST_KEYBOARD_GROUP_CODE.store(0, Ordering::Relaxed);
+        LAST_KEYBOARD_KEY_CODE.store(0, Ordering::Relaxed);
+        LAST_MOUSE_GROUP_CODE.store(0, Ordering::Relaxed);
+        CURSOR_RATIO_X_PERMILLE.store(500, Ordering::Relaxed);
+        CURSOR_RATIO_Y_PERMILLE.store(500, Ordering::Relaxed);
+        KEYBOARD_STATE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .pressed_keys
+            .clear();
+        guard
+    }
 
     #[test]
     fn 输入活跃窗口应只在短时间内保持有效() {
+        let _guard = reset_avatar_input_test_state();
         assert!(!is_input_still_active(0, 1000, 180));
         assert!(is_input_still_active(900, 1000, 180));
         assert!(!is_input_still_active(700, 1000, 180));
@@ -1327,6 +1501,14 @@ mod tests {
 
     #[test]
     fn 输入载荷应根据最近输入时间生成键鼠活跃状态() {
+        let _guard = reset_avatar_input_test_state();
+        KEYBOARD_STATE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .pressed_keys = vec![PressedKeyState {
+            key_code: 12,
+            pressed_at_ms: 1000,
+        }];
         LAST_KEYBOARD_INPUT_AT_MS.store(1000, Ordering::Relaxed);
         LAST_MOUSE_INPUT_AT_MS.store(850, Ordering::Relaxed);
         LAST_KEYBOARD_GROUP_CODE.store(KEYBOARD_GROUP_KEY_Q, Ordering::Relaxed);
@@ -1339,18 +1521,85 @@ mod tests {
         assert!(payload.keyboard_active);
         assert!(payload.mouse_active);
         assert_eq!(payload.keyboard_group, "key-q");
+        assert_eq!(payload.keyboard_groups, vec!["key-q".to_string()]);
         assert_eq!(payload.keyboard_visual_key, "KeyQ");
+        assert_eq!(payload.keyboard_visual_keys, vec!["KeyQ".to_string()]);
         assert_eq!(payload.mouse_group, "mouse-right");
         assert_eq!(payload.cursor_ratio_x, 0.25);
         assert_eq!(payload.cursor_ratio_y, 0.75);
 
+        KEYBOARD_STATE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .pressed_keys
+            .clear();
         let payload = build_avatar_input_payload(1200);
         assert!(!payload.keyboard_active);
         assert!(!payload.mouse_active);
     }
 
     #[test]
+    fn 多键按住时应返回完整键集合而不是只保留最后一个键() {
+        let _guard = reset_avatar_input_test_state();
+        {
+            let mut state = KEYBOARD_STATE.lock().unwrap_or_else(|e| e.into_inner());
+            state.pressed_keys = vec![
+                PressedKeyState {
+                    key_code: 13,
+                    pressed_at_ms: 1950,
+                },
+                PressedKeyState {
+                    key_code: 2,
+                    pressed_at_ms: 2000,
+                },
+            ];
+        }
+        LAST_KEYBOARD_INPUT_AT_MS.store(2000, Ordering::Relaxed);
+        LAST_KEYBOARD_GROUP_CODE.store(KEYBOARD_GROUP_KEY_D, Ordering::Relaxed);
+        LAST_KEYBOARD_KEY_CODE.store(2, Ordering::Relaxed);
+
+        let payload = build_avatar_input_payload(2010);
+        assert!(payload.keyboard_active);
+        assert_eq!(payload.keyboard_group, "key-d");
+        assert_eq!(
+            payload.keyboard_groups,
+            vec!["key-d".to_string(), "key-w".to_string()]
+        );
+        assert_eq!(
+            payload.keyboard_visual_keys,
+            vec!["KeyD".to_string(), "KeyW".to_string()]
+        );
+    }
+
+    #[test]
+    fn 过旧的残留按键不应继续触发组合键显示() {
+        let _guard = reset_avatar_input_test_state();
+        {
+            let mut state = KEYBOARD_STATE.lock().unwrap_or_else(|e| e.into_inner());
+            state.pressed_keys = vec![
+                PressedKeyState {
+                    key_code: 59,
+                    pressed_at_ms: 1000,
+                },
+                PressedKeyState {
+                    key_code: 48,
+                    pressed_at_ms: 2400,
+                },
+            ];
+        }
+        LAST_KEYBOARD_INPUT_AT_MS.store(2400, Ordering::Relaxed);
+        LAST_KEYBOARD_GROUP_CODE.store(KEYBOARD_GROUP_KEY_Q, Ordering::Relaxed);
+        LAST_KEYBOARD_KEY_CODE.store(48, Ordering::Relaxed);
+
+        let payload = build_avatar_input_payload(2420);
+        assert!(payload.keyboard_groups.is_empty());
+        assert_eq!(payload.keyboard_group, "key-q");
+        assert_eq!(payload.keyboard_visual_keys, vec!["Tab".to_string()]);
+    }
+
+    #[test]
     fn 键盘键码应映射到原版键区分组() {
+        let _guard = reset_avatar_input_test_state();
         assert_eq!(
             standard_keyboard_group_from_key_code(18),
             KEYBOARD_GROUP_DIGIT_1
@@ -1396,6 +1645,7 @@ mod tests {
 
     #[test]
     fn 键盘键码应映射到源资源图层名称() {
+        let _guard = reset_avatar_input_test_state();
         assert_eq!(keyboard_visual_key_from_key_code(0), "KeyA");
         assert_eq!(keyboard_visual_key_from_key_code(45), "KeyN");
         assert_eq!(keyboard_visual_key_from_key_code(31), "KeyO");
@@ -1416,6 +1666,7 @@ mod tests {
 
     #[test]
     fn 鼠标分组标签应映射到原版鼠标模式名称() {
+        let _guard = reset_avatar_input_test_state();
         assert_eq!(mouse_group_label(MOUSE_GROUP_MOVE), "mouse-move");
         assert_eq!(mouse_group_label(MOUSE_GROUP_LEFT), "mouse-left");
         assert_eq!(mouse_group_label(MOUSE_GROUP_RIGHT), "mouse-right");
@@ -1424,6 +1675,7 @@ mod tests {
 
     #[test]
     fn linux_x11会话应支持桌宠输入联动() {
+        let _guard = reset_avatar_input_test_state();
         use crate::linux_session::LinuxDesktopSession;
 
         assert!(linux_session_supports_avatar_input(
@@ -1439,6 +1691,7 @@ mod tests {
 
     #[test]
     fn linux_keysym应映射到桌宠可消费的统一键码() {
+        let _guard = reset_avatar_input_test_state();
         assert_eq!(linux_keysym_to_avatar_key_code(0x0061), Some(0));
         assert_eq!(linux_keysym_to_avatar_key_code(0x0077), Some(13));
         assert_eq!(linux_keysym_to_avatar_key_code(0x0031), Some(18));
@@ -1450,6 +1703,7 @@ mod tests {
 
     #[test]
     fn linux鼠标按钮应映射到桌宠鼠标分组() {
+        let _guard = reset_avatar_input_test_state();
         assert_eq!(linux_mouse_group_from_button_detail(1), MOUSE_GROUP_LEFT);
         assert_eq!(linux_mouse_group_from_button_detail(3), MOUSE_GROUP_RIGHT);
         assert_eq!(linux_mouse_group_from_button_detail(8), MOUSE_GROUP_SIDE);
@@ -1458,6 +1712,7 @@ mod tests {
 
     #[test]
     fn kde_wayland应识别为仅鼠标联动() {
+        let _guard = reset_avatar_input_test_state();
         let support = linux_avatar_input_support_for_session(
             LinuxDesktopSession::Wayland,
             LinuxDesktopEnvironment::Kde,
@@ -1474,6 +1729,7 @@ mod tests {
 
     #[test]
     fn hyprland_wayland应识别为仅鼠标联动() {
+        let _guard = reset_avatar_input_test_state();
         let support = linux_avatar_input_support_for_session(
             LinuxDesktopSession::Wayland,
             LinuxDesktopEnvironment::Hyprland,
@@ -1490,6 +1746,7 @@ mod tests {
 
     #[test]
     fn gnome_wayland在缺少provider时应视为不可用() {
+        let _guard = reset_avatar_input_test_state();
         let support = linux_avatar_input_support_for_session(
             LinuxDesktopSession::Wayland,
             LinuxDesktopEnvironment::Gnome,
@@ -1506,6 +1763,7 @@ mod tests {
 
     #[test]
     fn kdotool鼠标位置输出应解析为坐标() {
+        let _guard = reset_avatar_input_test_state();
         assert_eq!(
             parse_kdotool_mouse_location_output("x:1489 y:812 screen:0 window:50331653"),
             Some((1489, 812))
@@ -1515,6 +1773,7 @@ mod tests {
 
     #[test]
     fn gnome_wayland在扩展可用时应识别为完整联动() {
+        let _guard = reset_avatar_input_test_state();
         let support = linux_avatar_input_support_for_session(
             LinuxDesktopSession::Wayland,
             LinuxDesktopEnvironment::Gnome,
@@ -1531,6 +1790,7 @@ mod tests {
 
     #[test]
     fn gnome_avatar_input_dbus输出应解析坐标鼠标分组与最近按键() {
+        let _guard = reset_avatar_input_test_state();
         let output = "('{\"x\":1489,\"y\":812,\"mouseGroup\":\"mouse-right\",\"keyval\":113,\"keycode\":24,\"keyboardTimestampMs\":123456}','')";
         assert_eq!(
             parse_gnome_avatar_input_dbus_output(output),
@@ -1546,6 +1806,7 @@ mod tests {
 
     #[test]
     fn hyprctl_cursorpos输出应解析为坐标() {
+        let _guard = reset_avatar_input_test_state();
         assert_eq!(
             parse_hyprctl_cursorpos_output("1489, 812"),
             Some((1489, 812))

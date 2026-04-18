@@ -1,5 +1,7 @@
 <script>
   import { createEventDispatcher } from 'svelte';
+  import { cubicOut } from 'svelte/easing';
+  import { tweened } from 'svelte/motion';
   import {
     getAvatarPresetDefinition,
     normalizeAvatarPresetId,
@@ -26,6 +28,8 @@
     'generating',
     'slacking',
   ]);
+  const cursorRatioXTween = tweened(0.5, { duration: 70, easing: cubicOut });
+  const cursorRatioYTween = tweened(0.5, { duration: 70, easing: cubicOut });
   function clamp01(value) {
     return Math.min(1, Math.max(0, value));
   }
@@ -327,8 +331,17 @@
   $: preset = getAvatarPresetDefinition(normalizeAvatarPresetId(state.avatarPreset));
   $: renderMode = preset.renderMode ?? 'standard';
   $: sceneInteractionLayout = preset.interactionLayout ?? null;
-  $: cursorRatioX = inputActivity.cursorRatioX ?? 0.5;
-  $: cursorRatioY = inputActivity.cursorRatioY ?? 0.5;
+  $: cursorTweenDuration = mouseActive ? 44 : 110;
+  $: cursorRatioXTween.set(inputActivity.cursorRatioX ?? 0.5, {
+    duration: cursorTweenDuration,
+    easing: cubicOut,
+  });
+  $: cursorRatioYTween.set(inputActivity.cursorRatioY ?? 0.5, {
+    duration: cursorTweenDuration,
+    easing: cubicOut,
+  });
+  $: cursorRatioX = $cursorRatioXTween;
+  $: cursorRatioY = $cursorRatioYTween;
   $: sceneSrc = preset.sceneSrc;
   $: contentTransform = preset.contentTransform ?? '';
   $: staticCoverSrc = preset.staticCoverSrc ?? null;
@@ -382,7 +395,7 @@
   $: mouseDeviceX = mouseGeometry.mouseX;
   $: mouseDeviceY = mouseGeometry.mouseY;
   $: keyboardHotspots = keyboardActive && sceneInteractionLayout
-    ? sceneInteractionLayout.keyboardHotspots?.[keyboardGroup] ?? []
+    ? keyboardGroups.flatMap((groupName) => sceneInteractionLayout.keyboardHotspots?.[groupName] ?? [])
     : [];
   $: mouseHotspots = mouseActive && sceneInteractionLayout && !mouseVisualSrc && !preset.mouseMotionModel
     ? sceneInteractionLayout.mouseHotspots?.[mouseGroup] ?? []

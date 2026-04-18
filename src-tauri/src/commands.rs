@@ -1,7 +1,7 @@
 use crate::analysis::AppLocale;
 use crate::config::{
-    AiProvider, AiProviderConfig, AppCategoryRule, AppConfig, CustomSemanticCategory, ModelConfig,
-    WebsiteSemanticRule,
+    AiProvider, AiProviderConfig, AppCategoryRule, AppConfig, AvatarFollowupItem,
+    CustomSemanticCategory, ModelConfig, WebsiteSemanticRule,
 };
 use crate::database::Database;
 use crate::database::{
@@ -29,7 +29,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_updater::UpdaterExt;
 
 const GITHUB_LATEST_RELEASE_API: &str =
@@ -165,6 +165,18 @@ pub struct GnomeAvatarExtensionInstallResult {
     pub requires_relogin: bool,
     pub extension_dir: String,
     pub message: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct AvatarFollowupActionInput {
+    pub action: String,
+    pub project_key: String,
+    pub title: String,
+    pub date: String,
+    pub source_app: String,
+    pub source_title: String,
+    pub persona: String,
 }
 
 #[derive(Serialize, Debug, Clone)]
@@ -2555,7 +2567,7 @@ fn filter_activities_by_privacy(
         .collect()
 }
 
-fn load_filtered_activities_in_range(
+pub(crate) fn load_filtered_activities_in_range(
     state: &AppState,
     date_from: Option<&str>,
     date_to: Option<&str>,
@@ -2570,6 +2582,65 @@ fn load_filtered_activities_in_range(
         &ignored_apps,
         &excluded_domains,
     ))
+}
+
+fn manual_followups_in_range(
+    items: &[AvatarFollowupItem],
+    date_from: Option<&str>,
+    date_to: Option<&str>,
+) -> Vec<AvatarFollowupItem> {
+    items
+        .iter()
+        .filter(|item| item.status == "open")
+        .filter(|item| {
+            date_from.map(|start| item.date.as_str() >= start).unwrap_or(true)
+                && date_to.map(|end| item.date.as_str() <= end).unwrap_or(true)
+        })
+        .cloned()
+        .collect()
+}
+
+fn merge_manual_followups_into_todos(
+    mut extracted: TodoExtractionResult,
+    manual_items: &[AvatarFollowupItem],
+    date_from: Option<&str>,
+    date_to: Option<&str>,
+) -> TodoExtractionResult {
+    let manual_items = manual_followups_in_range(manual_items, date_from, date_to);
+    if manual_items.is_empty() {
+        return extracted;
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    for item in &extracted.items {
+        seen.insert(item.title.trim().to_lowercase());
+    }
+
+    for item in manual_items {
+        let normalized = item.title.trim().to_lowercase();
+        if normalized.is_empty() || !seen.insert(normalized) {
+            continue;
+        }
+
+        extracted.items.push(crate::work_intelligence::TodoItem {
+            title: item.title.clone(),
+            date: item.date.clone(),
+            source_title: item.source_title.clone(),
+            source_app: item.source_app.clone(),
+            confidence: 96,
+            reason: "桌宠手动加入待跟进".to_string(),
+        });
+    }
+
+    extracted.items.sort_by(|a, b| {
+        b.confidence
+            .cmp(&a.confidence)
+            .then_with(|| b.date.cmp(&a.date))
+            .then_with(|| a.title.cmp(&b.title))
+    });
+    extracted.items.truncate(20);
+    extracted.summary = format!("共整理出 {} 条待跟进项（含桌宠手动加入）。", extracted.items.len());
+    extracted
 }
 
 /// 获取单个活动（用于刷新详情页，获取最新 OCR 结果）
@@ -2739,7 +2810,18 @@ pub async fn chat_work_assistant(
         };
 
         let todos = if tools.contains(&AssistantTool::Todos) {
-            activities.as_ref().map(|items| extract_todos(items))
+            Some(merge_manual_followups_into_todos(
+                activities
+                    .as_ref()
+                    .map(|items| extract_todos(items))
+                    .unwrap_or_else(|| TodoExtractionResult {
+                        items: Vec::new(),
+                        summary: "当前时间范围内没有提取到明确的待办信号。".to_string(),
+                    }),
+                &state.config.avatar_followups,
+                date_from.as_deref(),
+                date_to.as_deref(),
+            ))
         } else {
             None
         };
@@ -2891,7 +2973,12 @@ pub async fn extract_todo_items(
         limit.unwrap_or(5000) as usize,
     )?;
 
-    Ok(extract_todos(&activities))
+    Ok(merge_manual_followups_into_todos(
+        extract_todos(&activities),
+        &state.config.avatar_followups,
+        date_from.as_deref(),
+        date_to.as_deref(),
+    ))
 }
 
 /// 生成日报
@@ -2943,6 +3030,7 @@ pub async fn generate_report(
             ),
             state.config.avatar_opacity,
             &state.config.avatar_preset,
+            &state.config.avatar_persona,
         );
         state.avatar_state = avatar_state.clone();
         if state.config.avatar_enabled {
@@ -2994,6 +3082,7 @@ pub async fn generate_report(
             ),
             state.config.avatar_opacity,
             &state.config.avatar_preset,
+            &state.config.avatar_persona,
         );
         state.avatar_state = avatar_state.clone();
         if state.config.avatar_enabled {
@@ -3154,6 +3243,7 @@ pub(crate) fn persist_app_config(
             state.avatar_state.clone(),
             config.avatar_opacity,
             &config.avatar_preset,
+            &config.avatar_persona,
         );
         (
             previous_config.avatar_enabled,
@@ -3243,6 +3333,7 @@ fn refresh_avatar_state_for_current_window(app: &AppHandle, state: &Arc<Mutex<Ap
             ),
             state_guard.config.avatar_opacity,
             &state_guard.config.avatar_preset,
+            &state_guard.config.avatar_persona,
         );
         state_guard.avatar_state = next_state.clone();
         next_state
@@ -4182,6 +4273,30 @@ pub async fn save_avatar_position(
     Ok(())
 }
 
+/// 从桌面助手窗口读取当前位置并持久化
+#[tauri::command]
+pub async fn persist_avatar_position(
+    app: AppHandle,
+    state: State<'_, Arc<Mutex<AppState>>>,
+) -> Result<bool, AppError> {
+    let Some(window) = app.get_webview_window(crate::avatar_engine::AVATAR_WINDOW_LABEL) else {
+        return Ok(false);
+    };
+
+    let position = window
+        .outer_position()
+        .map_err(|e| AppError::Unknown(format!("读取桌面助手位置失败: {e}")))?;
+
+    let mut state = state.lock().map_err(|e| AppError::Unknown(e.to_string()))?;
+    let config_path = state.config_path.clone();
+
+    state.config.avatar_x = Some(position.x);
+    state.config.avatar_y = Some(position.y);
+    state.config.save(&config_path)?;
+
+    Ok(true)
+}
+
 /// 显示主窗口
 #[tauri::command]
 pub async fn show_main_window(
@@ -4189,6 +4304,63 @@ pub async fn show_main_window(
     source_window_label: Option<String>,
 ) -> Result<(), AppError> {
     crate::reveal_main_window(&app, source_window_label.as_deref())
+}
+
+#[tauri::command]
+pub async fn handle_avatar_followup_action(
+    input: AvatarFollowupActionInput,
+    app: AppHandle,
+    state: State<'_, Arc<Mutex<AppState>>>,
+) -> Result<serde_json::Value, AppError> {
+    let project_key = input.project_key.trim().to_string();
+    if project_key.is_empty() {
+        return Err(AppError::Unknown("缺少项目标识，无法处理桌宠待跟进动作".to_string()));
+    }
+
+    let action = match input.action.trim() {
+        "timeline" => crate::avatar_followup::AvatarFollowupAction::Timeline,
+        "focus" => crate::avatar_followup::AvatarFollowupAction::Focus,
+        "remember" => crate::avatar_followup::AvatarFollowupAction::Remember,
+        "snooze" => crate::avatar_followup::AvatarFollowupAction::Snooze,
+        _ => crate::avatar_followup::AvatarFollowupAction::Dismiss,
+    };
+
+    if matches!(action, crate::avatar_followup::AvatarFollowupAction::Remember) {
+        let mut config = {
+            let state = state.lock().map_err(|e| AppError::Unknown(e.to_string()))?;
+            state.config.clone()
+        };
+
+        let normalized_title = input.title.trim().to_string();
+        let exists = config.avatar_followups.iter().any(|item| {
+            item.status == "open"
+                && item.project_key == project_key
+                && item.title.trim() == normalized_title
+        });
+
+        if !exists {
+            config.avatar_followups.push(AvatarFollowupItem {
+                id: uuid::Uuid::new_v4().to_string(),
+                title: normalized_title,
+                date: input.date.trim().to_string(),
+                source_app: input.source_app.trim().to_string(),
+                source_title: input.source_title.trim().to_string(),
+                project_key: project_key.clone(),
+                created_at: chrono::Local::now().timestamp(),
+                status: "open".to_string(),
+            });
+
+            persist_app_config(config, app.clone(), state.inner())?;
+        }
+    }
+
+    crate::avatar_followup::apply_followup_action(&project_key, action, &input.persona);
+
+    Ok(serde_json::json!({
+        "ok": true,
+        "action": input.action,
+        "projectKey": project_key,
+    }))
 }
 
 /// 获取数据目录
@@ -5941,6 +6113,57 @@ pub async fn check_permissions() -> Result<serde_json::Value, AppError> {
     }))
 }
 
+#[cfg(target_os = "macos")]
+fn macos_permission_settings_url(permission: &str) -> Option<&'static str> {
+    match permission {
+        "screen_capture" => {
+            Some("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")
+        }
+        "accessibility" => {
+            Some("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
+        }
+        "input_monitoring" => {
+            Some("x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent")
+        }
+        _ => None,
+    }
+}
+
+/// 打开系统权限设置页
+#[tauri::command]
+pub async fn open_permission_settings(permission: String) -> Result<(), AppError> {
+    #[cfg(target_os = "macos")]
+    {
+        match permission.as_str() {
+            "screen_capture" => crate::screenshot::request_screen_capture_permission(),
+            "accessibility" => {
+                crate::screenshot::has_accessibility_permission(true);
+            }
+            "input_monitoring" => crate::screenshot::request_input_monitoring_permission(),
+            _ => {}
+        }
+
+        let target = macos_permission_settings_url(&permission).ok_or_else(|| {
+            AppError::Unknown(format!("不支持的权限类型: {}", permission))
+        })?;
+
+        std::process::Command::new("open")
+            .arg(target)
+            .spawn()
+            .map_err(|e| AppError::Unknown(format!("打开系统权限设置失败: {e}")))?;
+
+        return Ok(());
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = permission;
+        Err(AppError::Unknown(
+            "当前平台暂不支持直接跳转系统权限设置".to_string(),
+        ))
+    }
+}
+
 /// 检查是否在工作时间内
 #[tauri::command]
 pub async fn is_work_time(state: State<'_, Arc<Mutex<AppState>>>) -> Result<bool, AppError> {
@@ -7097,6 +7320,24 @@ mod tests {
             duration: Some(3600),
             score: 120,
         }]
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mac_permission_settings_url_should_match_expected_panels() {
+        assert_eq!(
+            super::macos_permission_settings_url("screen_capture"),
+            Some("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")
+        );
+        assert_eq!(
+            super::macos_permission_settings_url("accessibility"),
+            Some("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
+        );
+        assert_eq!(
+            super::macos_permission_settings_url("input_monitoring"),
+            Some("x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent")
+        );
+        assert_eq!(super::macos_permission_settings_url("unknown"), None);
     }
 
     #[test]

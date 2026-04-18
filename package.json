@@ -10,7 +10,8 @@
     "icons:build": "node scripts/build-icons.mjs",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
-    "tauri:build": "tauri build"
+    "tauri:build": "tauri build",
+    "tauri:build:local-mac": "tauri build --target aarch64-apple-darwin --config src-tauri/tauri.local.conf.json"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^3.0.0",

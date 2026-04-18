@@ -20,24 +20,40 @@
   import AvatarPresetPreview from '$lib/components/Avatar/AvatarPresetPreview.svelte';
 
   export let config;
+  export let mode = 'full';
 
   const dispatch = createEventDispatcher();
   $: currentLocale = $locale;
+  $: showAvatarControls = mode === 'full' || mode === 'avatar-only';
+  $: showBackgroundSettings = mode === 'full' || mode === 'background-only';
 
   let avatarSaving = false;
   let avatarScaleSaving = false;
   let avatarOpacitySaving = false;
+  let avatarPersonaSaving = false;
   let avatarPresetSaving = false;
   let avatarScaleTimer = null;
   let avatarOpacityTimer = null;
   const breakReminderIntervals = [30, 45, 50, 60, 90, 120];
+  const AVATAR_PERSONA_OPTIONS = [
+    {
+      id: 'companion',
+      titleKey: 'settingsAppearance.avatarPersonaCompanionTitle',
+      descriptionKey: 'settingsAppearance.avatarPersonaCompanionDesc',
+    },
+    {
+      id: 'assistant',
+      titleKey: 'settingsAppearance.avatarPersonaAssistantTitle',
+      descriptionKey: 'settingsAppearance.avatarPersonaAssistantDesc',
+    },
+    {
+      id: 'coach',
+      titleKey: 'settingsAppearance.avatarPersonaCoachTitle',
+      descriptionKey: 'settingsAppearance.avatarPersonaCoachDesc',
+    },
+  ];
   let blurLabels = [];
   let avatarToggleUi;
-  let runtimePlatform = '';
-  let linuxSessionSupport = null;
-  let permissionStatus = null;
-  let gnomeExtensionInstalling = false;
-
   // === 背景图片 ===
   let bgPreview = null;
   let bgUploading = false;
@@ -59,77 +75,12 @@
   $: avatarScaleLabel = formatAvatarScaleLabel(avatarScale);
   $: avatarOpacity = clampAvatarOpacity(config.avatar_opacity ?? AVATAR_OPACITY_DEFAULT);
   $: avatarOpacityLabel = formatAvatarOpacityLabel(avatarOpacity);
-  $: avatarInputSupportLabelKey = linuxSessionSupport?.avatarInputSupportLevel === 'full'
-    ? 'settingsAppearance.avatarInputFull'
-    : linuxSessionSupport?.avatarInputSupportLevel === 'mouse-only'
-      ? 'settingsAppearance.avatarInputMouseOnly'
-      : 'settingsAppearance.avatarInputUnavailable';
-  $: avatarInputSupportHintKey = linuxSessionSupport?.avatarInputSupportLevel === 'full'
-    ? 'settingsAppearance.avatarInputFullHint'
-    : linuxSessionSupport?.avatarInputSupportLevel === 'mouse-only'
-      ? 'settingsAppearance.avatarInputMouseOnlyHint'
-      : 'settingsAppearance.avatarInputUnavailableHint';
-  $: macPermissionItems = permissionStatus
-    ? [
-        {
-          labelKey: 'settingsAppearance.avatarScreenCapturePermission',
-          granted: permissionStatus.screenCapture,
-        },
-        {
-          labelKey: 'settingsAppearance.avatarAccessibilityPermission',
-          granted: permissionStatus.accessibility,
-        },
-        {
-          labelKey: 'settingsAppearance.avatarInputMonitoringPermission',
-          granted: permissionStatus.inputMonitoring,
-        },
-      ]
-    : [];
-  $: showGnomeExtensionInstaller = runtimePlatform === 'linux'
-    && linuxSessionSupport?.desktopEnvironment === 'gnome'
-    && !linuxSessionSupport?.gnomeAvatarExtensionEnabled;
-  $: showGnomeExtensionRelogin = runtimePlatform === 'linux'
-    && linuxSessionSupport?.desktopEnvironment === 'gnome'
-    && linuxSessionSupport?.gnomeAvatarExtensionNeedsRelogin;
-
-  function normalizePermissionStatus(rawStatus) {
-    if (!rawStatus || typeof rawStatus !== 'object') {
-      return null;
-    }
-
-    return {
-      screenCapture: Boolean(rawStatus.screen_capture),
-      accessibility: Boolean(rawStatus.accessibility),
-      inputMonitoring: Boolean(rawStatus.input_monitoring),
-      screenshotSupported: Boolean(rawStatus.screenshot_supported),
-      avatarInputSupported: Boolean(rawStatus.avatar_input_supported),
-      allGranted: Boolean(rawStatus.all_granted),
-    };
-  }
-
-  async function refreshPlatformSupport() {
-    runtimePlatform = await invoke('get_runtime_platform');
-    permissionStatus = normalizePermissionStatus(await invoke('check_permissions'));
-
-    if (runtimePlatform === 'linux') {
-      linuxSessionSupport = await invoke('get_linux_session_support');
-    } else {
-      linuxSessionSupport = null;
-    }
-  }
-
   onMount(async () => {
-    try {
-      const b64 = await invoke('get_background_image');
-      if (b64) bgPreview = `data:image/jpeg;base64,${b64}`;
-    } catch (e) { /* ignore */ }
-
-    try {
-      await refreshPlatformSupport();
-    } catch (e) {
-      console.error('读取平台桌宠能力失败:', e);
-      linuxSessionSupport = null;
-      permissionStatus = null;
+    if (showBackgroundSettings) {
+      try {
+        const b64 = await invoke('get_background_image');
+        if (b64) bgPreview = `data:image/jpeg;base64,${b64}`;
+      } catch (e) { /* ignore */ }
     }
   });
 
@@ -147,6 +98,14 @@
     avatarSaving = true;
 
     try {
+      if (config.avatar_enabled) {
+        try {
+          await invoke('persist_avatar_position');
+        } catch (persistError) {
+          console.warn('关闭桌面助手前持久化位置失败:', persistError);
+        }
+      }
+
       const enabled = await toggleAvatarSetting(config, async (nextConfig) => {
         await invoke('save_config', { config: nextConfig });
       });
@@ -241,6 +200,28 @@
     }
   }
 
+  async function selectAvatarPersona(personaId) {
+    if (avatarPersonaSaving || config.avatar_persona === personaId) {
+      return;
+    }
+
+    avatarPersonaSaving = true;
+    const previousPersona = config.avatar_persona;
+    config.avatar_persona = personaId;
+    dispatch('change', config);
+
+    try {
+      await invoke('save_config', { config });
+    } catch (e) {
+      config.avatar_persona = previousPersona;
+      dispatch('change', config);
+      console.error('保存桌宠互动风格失败:', e);
+      showToast(t('settingsAppearance.avatarPersonaSaveFailed', { error: e }), 'error');
+    } finally {
+      avatarPersonaSaving = false;
+    }
+  }
+
   function toggleBreakReminder() {
     if (!config.avatar_enabled) {
       return;
@@ -327,29 +308,9 @@
       }
     }));
   }
-
-  async function installGnomeAvatarExtension() {
-    if (gnomeExtensionInstalling) {
-      return;
-    }
-
-    gnomeExtensionInstalling = true;
-    try {
-      const result = await invoke('install_gnome_avatar_extension');
-      showToast(
-        result.message,
-        result.requiresRelogin ? 'warning' : result.enabled ? 'success' : 'info'
-      );
-      await refreshPlatformSupport();
-    } catch (e) {
-      console.error('自动安装 GNOME 桌宠扩展失败:', e);
-      showToast(t('settingsAppearance.avatarGnomeExtensionInstallFailed', { error: e }), 'error');
-    } finally {
-      gnomeExtensionInstalling = false;
-    }
-  }
 </script>
 
+{#if showAvatarControls}
 <div class="settings-card" data-locale={currentLocale}>
   <div class="settings-section">
     <div class="flex items-center justify-between gap-4">
@@ -374,170 +335,6 @@
         <span class="switch-thumb {avatarToggleUi.thumbClass}"></span>
       </button>
     </div>
-
-    {#if runtimePlatform === 'linux' && linuxSessionSupport}
-      <div class="settings-block rounded-xl border border-slate-200 bg-slate-50/80 p-4 dark:border-slate-700 dark:bg-slate-900/40">
-        <div class="flex items-center justify-between gap-3">
-          <div>
-            <div class="settings-text">{t('settingsAppearance.avatarLinuxSupportTitle')}</div>
-            <div class="settings-muted mt-0.5">{t('settingsAppearance.avatarLinuxSupportHint')}</div>
-          </div>
-          <div class="text-[11px] font-semibold uppercase tracking-[0.08em] text-slate-500 dark:text-slate-400">
-            {linuxSessionSupport.sessionType} / {linuxSessionSupport.desktopEnvironment}
-          </div>
-        </div>
-
-        <div class="mt-3 flex items-center justify-between gap-3 text-sm">
-          <div class="settings-subtle">{t('settingsAppearance.avatarScreenshotSupportTitle')}</div>
-          <div class="font-semibold text-slate-700 dark:text-slate-200">
-            {linuxSessionSupport.screenshotSupported
-              ? t('settingsAppearance.avatarPermissionGranted')
-              : t('settingsAppearance.avatarPermissionMissing')}
-          </div>
-        </div>
-
-        <div class="mt-3 flex items-center justify-between gap-3 text-sm">
-          <div class="settings-subtle">{t('settingsAppearance.avatarInputSupportTitle')}</div>
-          <div class="font-semibold text-slate-700 dark:text-slate-200">
-            {t(avatarInputSupportLabelKey)}
-          </div>
-        </div>
-
-        <div class="mt-2 flex items-center justify-between gap-3 text-sm">
-          <div class="settings-subtle">{t('settingsAppearance.avatarInputProviderLabel')}</div>
-          <div class="font-mono text-xs text-slate-500 dark:text-slate-400">
-            {linuxSessionSupport.avatarInputProvider}
-          </div>
-        </div>
-
-        <div class="mt-2 text-[12px] text-slate-500 dark:text-slate-400">
-          {t(avatarInputSupportHintKey)}
-        </div>
-
-        {#if linuxSessionSupport.desktopEnvironment === 'gnome'}
-          <div class="mt-3 flex items-center justify-between gap-3 text-sm">
-            <div class="settings-subtle">{t('settingsAppearance.avatarGnomeExtensionTitle')}</div>
-            <div class="font-semibold text-slate-700 dark:text-slate-200">
-              {linuxSessionSupport.gnomeAvatarExtensionNeedsRelogin
-                ? t('settingsAppearance.avatarGnomeExtensionRelogin')
-                : linuxSessionSupport.gnomeAvatarExtensionEnabled
-                ? t('settingsAppearance.avatarGnomeExtensionReady')
-                : linuxSessionSupport.gnomeAvatarExtensionInstalled
-                  ? t('settingsAppearance.avatarGnomeExtensionInstalled')
-                  : t('settingsAppearance.avatarGnomeExtensionMissing')}
-            </div>
-          </div>
-
-          {#if showGnomeExtensionRelogin}
-            <div class="mt-2 text-[12px] text-amber-700 dark:text-amber-300">
-              {t('settingsAppearance.avatarGnomeExtensionReloginHint')}
-            </div>
-          {/if}
-
-          {#if showGnomeExtensionInstaller}
-            <div class="mt-3 flex items-center justify-between gap-3">
-              <div class="text-[12px] text-slate-500 dark:text-slate-400">
-                {t('settingsAppearance.avatarGnomeExtensionHint')}
-              </div>
-              <button
-                type="button"
-                on:click={installGnomeAvatarExtension}
-                class="rounded-lg border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-700 transition hover:border-slate-400 hover:bg-white disabled:cursor-wait disabled:opacity-60 dark:border-slate-600 dark:text-slate-200 dark:hover:border-slate-500 dark:hover:bg-slate-800"
-                disabled={gnomeExtensionInstalling}
-              >
-                {gnomeExtensionInstalling
-                  ? t('settingsAppearance.avatarGnomeExtensionInstalling')
-                  : t('settingsAppearance.avatarGnomeExtensionInstall')}
-              </button>
-            </div>
-          {/if}
-        {/if}
-      </div>
-    {/if}
-
-    {#if runtimePlatform === 'macos' && permissionStatus}
-      <div class="settings-block rounded-xl border border-slate-200 bg-slate-50/80 p-4 dark:border-slate-700 dark:bg-slate-900/40">
-        <div class="flex items-center justify-between gap-3">
-          <div>
-            <div class="settings-text">{t('settingsAppearance.avatarMacPermissionsTitle')}</div>
-            <div class="settings-muted mt-0.5">{t('settingsAppearance.avatarMacPermissionsHint')}</div>
-          </div>
-          <div class="text-[11px] font-semibold uppercase tracking-[0.08em] text-slate-500 dark:text-slate-400">
-            macOS
-          </div>
-        </div>
-
-        <div class="mt-3 flex items-center justify-between gap-3 text-sm">
-          <div class="settings-subtle">{t('settingsAppearance.avatarScreenshotSupportTitle')}</div>
-          <div class="font-semibold text-slate-700 dark:text-slate-200">
-            {permissionStatus.screenshotSupported
-              ? t('settingsAppearance.avatarPermissionGranted')
-              : t('settingsAppearance.avatarPermissionMissing')}
-          </div>
-        </div>
-
-        <div class="mt-2 flex items-center justify-between gap-3 text-sm">
-          <div class="settings-subtle">{t('settingsAppearance.avatarInputSupportTitle')}</div>
-          <div class="font-semibold text-slate-700 dark:text-slate-200">
-            {permissionStatus.avatarInputSupported
-              ? t('settingsAppearance.avatarPermissionGranted')
-              : t('settingsAppearance.avatarPermissionMissing')}
-          </div>
-        </div>
-
-        {#each macPermissionItems as item}
-          <div class="mt-2 flex items-center justify-between gap-3 text-sm">
-            <div class="settings-subtle">{t(item.labelKey)}</div>
-            <div class="font-semibold text-slate-700 dark:text-slate-200">
-              {item.granted
-                ? t('settingsAppearance.avatarPermissionGranted')
-                : t('settingsAppearance.avatarPermissionMissing')}
-            </div>
-          </div>
-        {/each}
-
-        {#if !permissionStatus.allGranted}
-          <div class="mt-2 text-[12px] text-amber-700 dark:text-amber-300">
-            {t('settingsAppearance.avatarPermissionMissingHint')}
-          </div>
-        {/if}
-      </div>
-    {/if}
-
-    {#if runtimePlatform === 'windows' && permissionStatus}
-      <div class="settings-block rounded-xl border border-slate-200 bg-slate-50/80 p-4 dark:border-slate-700 dark:bg-slate-900/40">
-        <div class="flex items-center justify-between gap-3">
-          <div>
-            <div class="settings-text">{t('settingsAppearance.avatarWindowsSupportTitle')}</div>
-            <div class="settings-muted mt-0.5">{t('settingsAppearance.avatarWindowsSupportHint')}</div>
-          </div>
-          <div class="text-[11px] font-semibold uppercase tracking-[0.08em] text-slate-500 dark:text-slate-400">
-            Windows
-          </div>
-        </div>
-
-        <div class="mt-3 flex items-center justify-between gap-3 text-sm">
-          <div class="settings-subtle">{t('settingsAppearance.avatarScreenshotSupportTitle')}</div>
-          <div class="font-semibold text-slate-700 dark:text-slate-200">
-            {permissionStatus.screenshotSupported
-              ? t('settingsAppearance.avatarPermissionGranted')
-              : t('settingsAppearance.avatarPermissionMissing')}
-          </div>
-        </div>
-
-        <div class="mt-2 flex items-center justify-between gap-3 text-sm">
-          <div class="settings-subtle">{t('settingsAppearance.avatarInputSupportTitle')}</div>
-          <div class="font-semibold text-slate-700 dark:text-slate-200">
-            {permissionStatus.avatarInputSupported
-              ? t('settingsAppearance.avatarPermissionGranted')
-              : t('settingsAppearance.avatarPermissionMissing')}
-          </div>
-        </div>
-      </div>
-    {/if}
-
-    <hr class="border-slate-200 dark:border-slate-700" />
-
     <div class="settings-block pt-1">
       <div class="flex items-center justify-between gap-3">
         <div>
@@ -597,6 +394,43 @@
         <span>{t('settingsAppearance.moreTransparent')}</span>
         <span>{t('settingsAppearance.default82')}</span>
         <span>{t('settingsAppearance.moreSolid')}</span>
+      </div>
+    </div>
+
+    <div class="settings-block pt-1">
+      <div class="flex items-center justify-between gap-3">
+        <div>
+          <div class="settings-text">{t('settingsAppearance.avatarPersona')}</div>
+          <div class="settings-muted mt-0.5">{t('settingsAppearance.avatarPersonaHint')}</div>
+        </div>
+        {#if avatarPersonaSaving}
+          <div class="text-xs text-slate-400 dark:text-slate-500">{t('settingsAppearance.syncing')}</div>
+        {/if}
+      </div>
+
+      <div class="mt-3 grid gap-3 md:grid-cols-3">
+        {#each AVATAR_PERSONA_OPTIONS as persona}
+          <button
+            type="button"
+            class="rounded-lg border p-3 text-left transition {config.avatar_persona === persona.id ? 'border-emerald-400 bg-emerald-50/80 shadow-sm dark:border-emerald-400/70 dark:bg-emerald-500/10' : 'border-slate-200 bg-white hover:border-slate-300 dark:border-slate-700 dark:bg-slate-900/60 dark:hover:border-slate-600'}"
+            on:click={() => selectAvatarPersona(persona.id)}
+            aria-pressed={config.avatar_persona === persona.id}
+          >
+            <div class="flex items-center justify-between gap-3">
+              <div class="text-sm font-semibold text-slate-800 dark:text-slate-100">
+                {t(persona.titleKey)}
+              </div>
+              {#if config.avatar_persona === persona.id}
+                <span class="rounded-full bg-emerald-500/12 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.08em] text-emerald-700 dark:text-emerald-300">
+                  {t('settingsAppearance.avatarPersonaCurrent')}
+                </span>
+              {/if}
+            </div>
+            <div class="mt-2 text-xs leading-5 text-slate-500 dark:text-slate-400">
+              {t(persona.descriptionKey)}
+            </div>
+          </button>
+        {/each}
       </div>
     </div>
 
@@ -675,8 +509,10 @@
     {/if}
   </div>
 </div>
+{/if}
 
 <!-- 背景图片 -->
+{#if showBackgroundSettings}
 <div class="settings-card" data-locale={currentLocale}>
   <h3 class="settings-card-title">{t('settingsAppearance.backgroundImage')}</h3>
   <p class="settings-card-desc">{t('settingsAppearance.backgroundImageDesc')}</p>
@@ -764,3 +600,4 @@
     {/if}
   </div>
 </div>
+{/if}

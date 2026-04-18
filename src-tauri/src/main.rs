@@ -10,6 +10,7 @@ mod activity_classifier;
 mod analysis;
 mod autostart;
 mod avatar_engine;
+mod avatar_followup;
 mod avatar_input;
 mod commands;
 mod config;
@@ -27,12 +28,13 @@ mod storage;
 mod work_intelligence;
 
 use chrono;
-use config::AppConfig;
+use config::{AppConfig, AvatarFollowupItem};
 use database::Database;
 use once_cell::sync::OnceCell;
 use privacy::PrivacyFilter;
 use screenshot::ScreenshotService;
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -606,6 +608,87 @@ fn advance_break_reminder(
     result
 }
 
+const AVATAR_SWITCH_NUDGE_WINDOW_MS: u64 = 3 * 60 * 1000;
+const AVATAR_SWITCH_NUDGE_THRESHOLD: usize = 4;
+const AVATAR_SWITCH_NUDGE_COOLDOWN_MS: u64 = 20 * 60 * 1000;
+const AVATAR_BACKLOG_NUDGE_COOLDOWN_MS: u64 = 90 * 60 * 1000;
+const AVATAR_BACKLOG_NUDGE_MIN_AGE_SECS: i64 = 30 * 60;
+const AVATAR_NUDGE_SWITCH_COMPANION: &str = "__avatar_nudge_switch_companion__";
+const AVATAR_NUDGE_SWITCH_ASSISTANT: &str = "__avatar_nudge_switch_assistant__";
+const AVATAR_NUDGE_SWITCH_COACH: &str = "__avatar_nudge_switch_coach__";
+
+#[derive(Default)]
+struct AvatarNudgeRuntime {
+    recent_switches_ms: VecDeque<u64>,
+    last_switch_nudge_at_ms: u64,
+    last_backlog_nudge_at_ms: u64,
+}
+
+fn avatar_switch_nudge_message_key(persona: &str) -> &'static str {
+    match persona.trim() {
+        "companion" => AVATAR_NUDGE_SWITCH_COMPANION,
+        "coach" => AVATAR_NUDGE_SWITCH_COACH,
+        _ => AVATAR_NUDGE_SWITCH_ASSISTANT,
+    }
+}
+
+fn avatar_backlog_nudge_message_key(persona: &str, count: usize) -> String {
+    format!("__avatar_backlog_nudge__:{}:{}", persona.trim(), count)
+}
+
+fn record_avatar_window_switch(runtime: &mut AvatarNudgeRuntime, now_ms: u64) -> bool {
+    runtime.recent_switches_ms.push_back(now_ms);
+
+    while runtime
+        .recent_switches_ms
+        .front()
+        .is_some_and(|timestamp| now_ms.saturating_sub(*timestamp) > AVATAR_SWITCH_NUDGE_WINDOW_MS)
+    {
+        runtime.recent_switches_ms.pop_front();
+    }
+
+    if runtime.recent_switches_ms.len() < AVATAR_SWITCH_NUDGE_THRESHOLD {
+        return false;
+    }
+
+    if runtime.last_switch_nudge_at_ms != 0
+        && now_ms.saturating_sub(runtime.last_switch_nudge_at_ms) < AVATAR_SWITCH_NUDGE_COOLDOWN_MS
+    {
+        return false;
+    }
+
+    runtime.last_switch_nudge_at_ms = now_ms;
+    true
+}
+
+fn count_open_avatar_followups_for_nudge(items: &[AvatarFollowupItem], now_ts: i64) -> usize {
+    items.iter()
+        .filter(|item| item.status == "open")
+        .filter(|item| now_ts.saturating_sub(item.created_at) >= AVATAR_BACKLOG_NUDGE_MIN_AGE_SECS)
+        .count()
+}
+
+fn should_emit_avatar_backlog_nudge(
+    runtime: &mut AvatarNudgeRuntime,
+    items: &[AvatarFollowupItem],
+    now_ts: i64,
+    now_ms: u64,
+) -> Option<usize> {
+    let count = count_open_avatar_followups_for_nudge(items, now_ts);
+    if count == 0 {
+        return None;
+    }
+
+    if runtime.last_backlog_nudge_at_ms != 0
+        && now_ms.saturating_sub(runtime.last_backlog_nudge_at_ms) < AVATAR_BACKLOG_NUDGE_COOLDOWN_MS
+    {
+        return None;
+    }
+
+    runtime.last_backlog_nudge_at_ms = now_ms;
+    Some(count)
+}
+
 pub(crate) fn default_data_dir() -> PathBuf {
     dirs::data_dir()
         .map(|d| d.join("work-review"))
@@ -1051,6 +1134,7 @@ fn avatar_activity_decision(
     is_paused: bool,
     avatar_opacity: f64,
     avatar_preset: &str,
+    avatar_persona: &str,
 ) -> AvatarActivityDecision {
     if !avatar_enabled {
         return AvatarActivityDecision {
@@ -1059,6 +1143,7 @@ fn avatar_activity_decision(
                 avatar_engine::default_avatar_state(),
                 avatar_opacity,
                 avatar_preset,
+                avatar_persona,
             )),
         };
     }
@@ -1070,6 +1155,7 @@ fn avatar_activity_decision(
                 avatar_engine::default_avatar_state(),
                 avatar_opacity,
                 avatar_preset,
+                avatar_persona,
             )),
         };
     }
@@ -1174,6 +1260,7 @@ async fn background_avatar_task(state: Arc<Mutex<AppState>>, app: AppHandle) {
     let mut pending_avatar_hits: u8 = 0;
     let mut last_window_signature: Option<String> = None;
     let mut break_reminder_runtime = BreakReminderRuntime::new();
+    let mut avatar_nudge_runtime = AvatarNudgeRuntime::default();
     const IDLE_TIMEOUT_MINUTES: u64 = 3;
     let idle_detector = idle_detector::IdleDetector::new(IDLE_TIMEOUT_MINUTES);
 
@@ -1183,6 +1270,7 @@ async fn background_avatar_task(state: Arc<Mutex<AppState>>, app: AppHandle) {
             avatar_generating_report,
             avatar_opacity,
             avatar_preset,
+            avatar_persona,
             is_recording,
             is_paused,
             break_reminder_enabled,
@@ -1194,6 +1282,7 @@ async fn background_avatar_task(state: Arc<Mutex<AppState>>, app: AppHandle) {
                 state_guard.avatar_generating_report,
                 state_guard.config.avatar_opacity,
                 state_guard.config.avatar_preset.clone(),
+                state_guard.config.avatar_persona.clone(),
                 state_guard.is_recording,
                 state_guard.is_paused,
                 state_guard.config.break_reminder_enabled,
@@ -1207,6 +1296,7 @@ async fn background_avatar_task(state: Arc<Mutex<AppState>>, app: AppHandle) {
             is_paused,
             avatar_opacity,
             &avatar_preset,
+            &avatar_persona,
         );
         let poll_interval_ms = avatar_monitor_poll_interval_ms_for_platform(
             cfg!(target_os = "macos"),
@@ -1228,6 +1318,7 @@ async fn background_avatar_task(state: Arc<Mutex<AppState>>, app: AppHandle) {
             pending_avatar_state = None;
             pending_avatar_hits = 0;
             last_window_signature = None;
+            avatar_nudge_runtime.recent_switches_ms.clear();
 
             if let Some(reset_state) = activity_decision.reset_state {
                 let should_emit_reset = last_avatar_state.as_ref() != Some(&reset_state);
@@ -1306,9 +1397,16 @@ async fn background_avatar_task(state: Arc<Mutex<AppState>>, app: AppHandle) {
             ),
             avatar_opacity,
             &avatar_preset,
+            &avatar_persona,
         );
 
-        let window_signature = format!("{}|{}", active_window.app_name, active_window.window_title);
+        let window_signature = format!(
+            "{}|{}|{}",
+            active_window.app_name,
+            active_window.window_title,
+            active_window.browser_url.as_deref().unwrap_or_default()
+        );
+        let window_changed = last_window_signature.as_deref() != Some(window_signature.as_str());
         let transition_decision = avatar_transition_decision(
             last_avatar_state.as_ref(),
             pending_avatar_state.as_ref(),
@@ -1355,13 +1453,78 @@ async fn background_avatar_task(state: Arc<Mutex<AppState>>, app: AppHandle) {
 
             last_avatar_state = Some(next_avatar_state);
             last_window_signature = Some(window_signature);
-        } else if last_window_signature.as_deref() != Some(window_signature.as_str()) {
+        } else if window_changed {
             log::debug!(
                 "🐾 桌宠检测到前台切换，但状态未变: {} | 采集耗时={}ms",
                 window_signature,
                 sampled_at.elapsed().as_millis()
             );
             last_window_signature = Some(window_signature);
+        }
+
+        if avatar_enabled && window_changed {
+            let now = chrono::Local::now();
+            let now_ts = now.timestamp();
+            let now_ms = now.timestamp_millis().max(0) as u64;
+            let switch_nudge_ready =
+                record_avatar_window_switch(&mut avatar_nudge_runtime, now_ms);
+            let date_from = (now - chrono::Duration::days(3))
+                .format("%Y-%m-%d")
+                .to_string();
+            let followup_result = {
+                let state_guard = state.lock().unwrap_or_else(|e| e.into_inner());
+                let activities = crate::commands::load_filtered_activities_in_range(
+                    &state_guard,
+                    Some(date_from.as_str()),
+                    None,
+                    480,
+                );
+                (
+                    activities,
+                    state_guard.config.avatar_persona.clone(),
+                    state_guard.config.avatar_followups.clone(),
+                )
+            };
+
+            if let (Ok(activities), persona, manual_followups) = followup_result {
+                let mut emitted_followup = false;
+                if let Some(payload) = crate::avatar_followup::find_followup_suggestion(
+                    &activities,
+                    &active_window,
+                    &persona,
+                    &manual_followups,
+                    now_ts,
+                ) {
+                    if crate::avatar_followup::should_emit_followup(&payload.project_key, now_ms) {
+                        crate::avatar_followup::emit_followup_suggestion(&app, &payload);
+                        crate::avatar_followup::note_followup_emitted(&payload.project_key, now_ms);
+                        emitted_followup = true;
+                    }
+                }
+
+                if !emitted_followup && switch_nudge_ready {
+                    avatar_engine::emit_avatar_bubble(
+                        &app,
+                        &avatar_engine::AvatarBubblePayload::info(
+                            avatar_switch_nudge_message_key(&persona),
+                        ),
+                    );
+                } else if !emitted_followup {
+                    if let Some(count) = should_emit_avatar_backlog_nudge(
+                        &mut avatar_nudge_runtime,
+                        &manual_followups,
+                        now_ts,
+                        now_ms,
+                    ) {
+                        avatar_engine::emit_avatar_bubble(
+                            &app,
+                            &avatar_engine::AvatarBubblePayload::info(
+                                avatar_backlog_nudge_message_key(&persona, count),
+                            ),
+                        );
+                    }
+                }
+            }
         }
     }
 }
@@ -2667,6 +2830,7 @@ async fn main() {
     let storage_manager = StorageManager::new(&data_dir, config.storage.clone());
     let initial_avatar_opacity = config.avatar_opacity;
     let initial_avatar_preset = config.avatar_preset.clone();
+    let initial_avatar_persona = config.avatar_persona.clone();
 
     // 启动时执行一次清理
     if let Err(e) = storage_manager.cleanup() {
@@ -2688,6 +2852,7 @@ async fn main() {
             avatar_engine::default_avatar_state(),
             initial_avatar_opacity,
             &initial_avatar_preset,
+            &initial_avatar_persona,
         ),
         avatar_generating_report: false,
         cached_active_window: None,
@@ -3014,6 +3179,7 @@ async fn main() {
             commands::get_recording_state,
             commands::get_avatar_state,
             commands::save_avatar_position,
+            commands::persist_avatar_position,
             commands::get_data_dir,
             commands::get_default_data_dir,
             commands::get_runtime_platform,
@@ -3059,6 +3225,7 @@ async fn main() {
             commands::get_ocr_log,
             commands::is_screen_locked,
             commands::check_permissions,
+            commands::open_permission_settings,
             commands::is_work_time,
             commands::check_ocr_available,
             commands::run_ocr,
@@ -3069,6 +3236,7 @@ async fn main() {
             commands::get_background_image,
             commands::clear_background_image,
             commands::show_main_window,
+            commands::handle_avatar_followup_action,
             get_platform,
         ])
         .build(tauri::generate_context!())
@@ -3117,17 +3285,17 @@ mod tests {
         browser_change_capture_min_interval_ms, effective_dock_visibility,
         launch_args_contain_autostart, main_window_close_behavior, monitoring_poll_interval_ms,
         monitoring_poll_interval_ms_for_platform, previous_app_backfill_duration,
-        recording_loop_decision, resolve_activity_classification, reusable_cached_active_window,
+        recording_loop_decision, record_avatar_window_switch, resolve_activity_classification,
+        reusable_cached_active_window, should_emit_avatar_backlog_nudge,
         screen_lock_check_interval_ms_for_platform, should_confirm_idle,
         should_hide_main_window_on_setup, should_persist_merge_update, should_prevent_exit,
         should_probe_browser_url_before_change_detection, should_request_screen_capture_permission,
         should_skip_system_window, tray_recording_toggle_action, tray_recording_toggle_label,
-        BreakReminderRuntime, BreakReminderSignal, MainWindowCloseBehavior, RecordingToggleAction,
+        AvatarNudgeRuntime, BreakReminderRuntime, BreakReminderSignal, MainWindowCloseBehavior,
+        RecordingToggleAction,
     };
-    use crate::avatar_engine::{
-        apply_avatar_visual_settings, default_avatar_state, derive_avatar_state,
-    };
-    use crate::config::{AppConfig, WebsiteSemanticRule};
+    use crate::avatar_engine::{apply_avatar_visual_settings, default_avatar_state, derive_avatar_state};
+    use crate::config::{AppConfig, AvatarFollowupItem, WebsiteSemanticRule};
     use crate::monitor::ActiveWindow;
     use std::time::{Duration, Instant};
 
@@ -3351,7 +3519,7 @@ mod tests {
 
     #[test]
     fn 暂停录制时桌宠应回到待命状态() {
-        let decision = avatar_activity_decision(true, true, true, 0.82, "keyboard-focus");
+        let decision = avatar_activity_decision(true, true, true, 0.82, "keyboard-focus", "assistant");
 
         assert!(!decision.should_continue);
         assert_eq!(
@@ -3360,13 +3528,14 @@ mod tests {
                 default_avatar_state(),
                 0.82,
                 "keyboard-focus",
+                "assistant",
             ))
         );
     }
 
     #[test]
     fn 停止录制时桌宠应回到待命状态() {
-        let decision = avatar_activity_decision(true, false, false, 0.82, "minimal-office");
+        let decision = avatar_activity_decision(true, false, false, 0.82, "minimal-office", "assistant");
 
         assert!(!decision.should_continue);
         assert_eq!(
@@ -3375,6 +3544,7 @@ mod tests {
                 default_avatar_state(),
                 0.82,
                 "minimal-office",
+                "assistant",
             ))
         );
     }
@@ -3643,5 +3813,40 @@ mod tests {
 
         assert!(disabled.should_clear);
         assert!(!disabled.should_emit);
+    }
+
+    #[test]
+    fn 短时间频繁切换窗口时应触发主动提醒() {
+        let mut runtime = AvatarNudgeRuntime::default();
+
+        assert!(!record_avatar_window_switch(&mut runtime, 1_000));
+        assert!(!record_avatar_window_switch(&mut runtime, 40_000));
+        assert!(!record_avatar_window_switch(&mut runtime, 80_000));
+        assert!(record_avatar_window_switch(&mut runtime, 120_000));
+        assert!(!record_avatar_window_switch(&mut runtime, 125_000));
+    }
+
+    #[test]
+    fn 待跟进堆积一段时间后应触发主动提醒() {
+        let mut runtime = AvatarNudgeRuntime::default();
+        let followups = vec![AvatarFollowupItem {
+            id: "1".to_string(),
+            title: "支付回调".to_string(),
+            date: "2024-03-09".to_string(),
+            source_app: "Cursor".to_string(),
+            source_title: "payments.ts".to_string(),
+            project_key: "cursor::payments".to_string(),
+            created_at: 1_710_000_000,
+            status: "open".to_string(),
+        }];
+
+        assert_eq!(
+            should_emit_avatar_backlog_nudge(&mut runtime, &followups, 1_710_003_000, 30_000),
+            Some(1)
+        );
+        assert_eq!(
+            should_emit_avatar_backlog_nudge(&mut runtime, &followups, 1_710_003_100, 31_000),
+            None
+        );
     }
 }

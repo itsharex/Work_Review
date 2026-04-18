@@ -1,12 +1,13 @@
 <script>
   import { onMount } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
-  import { listen } from '@tauri-apps/api/event';
+  import { emitTo, listen } from '@tauri-apps/api/event';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
   import AvatarCanvas from '../../lib/components/Avatar/AvatarCanvas.svelte';
+  import AvatarFollowupCard from '../../lib/components/Avatar/AvatarFollowupCard.svelte';
   import AvatarPopover from '../../lib/components/Avatar/AvatarPopover.svelte';
-  import { applyLocaleToDocument, initializeLocale, locale } from '$lib/i18n/index.js';
+  import { applyLocaleToDocument, initializeLocale, locale, t } from '$lib/i18n/index.js';
   import {
     getAvatarMotionStepDelay,
     getAvatarStateBubble,
@@ -25,6 +26,7 @@
     isGeneratingReport: false,
     avatarOpacity: 0.82,
     avatarPreset: 'original-standard',
+    avatarPersona: 'assistant',
   };
   let inputActivity = {
     keyboardActive: false,
@@ -40,6 +42,10 @@
   let bubbleSource = null;
   let bubble = null;
   let bubbleTimer = null;
+  let followup = null;
+  let focusSession = null;
+  let focusTimer = null;
+  let focusNowMs = 0;
   let lastStateBubbleAt = 0;
   let transitionClass = '';
   let transitionTimer = null;
@@ -54,6 +60,21 @@
   $: currentLocale = $locale;
 
   const RUNTIME_BUBBLE_MESSAGES = {
+    __avatar_nudge_switch_companion__: {
+      'zh-CN': '你切得有点快，我陪你回主线。',
+      'zh-TW': '你切得有點快，我陪你回主線。',
+      en: 'You are switching fast. Let us get back to the main thread.',
+    },
+    __avatar_nudge_switch_assistant__: {
+      'zh-CN': '切换有点频繁，建议先回到当前主线。',
+      'zh-TW': '切換有點頻繁，建議先回到目前主線。',
+      en: 'Lots of switching. It may help to return to the current thread first.',
+    },
+    __avatar_nudge_switch_coach__: {
+      'zh-CN': '别再切了，先把手上这段收住。',
+      'zh-TW': '別再切了，先把手上這段收住。',
+      en: 'Enough switching. Close this stretch before moving on.',
+    },
     '先放松一下，待会再继续推进。': {
       'zh-CN': '先放松一下，待会再继续推进。',
       'zh-TW': '先放鬆一下，待會再繼續推進。',
@@ -81,6 +102,83 @@
     },
   };
 
+  const FOLLOWUP_PERSONA_LABEL_KEY = {
+    companion: 'settingsAppearance.avatarPersonaCompanionTitle',
+    assistant: 'settingsAppearance.avatarPersonaAssistantTitle',
+    coach: 'settingsAppearance.avatarPersonaCoachTitle',
+  };
+
+  const FOLLOWUP_LEAD_KEY = {
+    companion: 'settingsAppearance.avatarFollowupCompanionLead',
+    assistant: 'settingsAppearance.avatarFollowupAssistantLead',
+    coach: 'settingsAppearance.avatarFollowupCoachLead',
+  };
+
+  const FOLLOWUP_PERSONA_THEME = {
+    companion: {
+      badgeClass: 'bg-emerald-500/12 text-emerald-700',
+      primaryClass: 'bg-emerald-500 hover:bg-emerald-600 text-white',
+      surfaceClass: 'border-emerald-200/95 bg-[linear-gradient(180deg,rgba(255,255,255,0.98),rgba(236,253,245,0.98))]',
+      strategyKey: 'settingsAppearance.avatarFollowupCompanionStrategy',
+      focusKey: 'settingsAppearance.avatarFollowupFocusCompanion',
+      rememberKey: 'settingsAppearance.avatarFollowupRememberCompanion',
+      snoozeKey: 'settingsAppearance.avatarFollowupSnoozeCompanion',
+      timelineOpeningKey: 'settingsAppearance.avatarFollowupTimelineOpeningCompanion',
+      rememberedKey: 'settingsAppearance.avatarFollowupRememberedCompanion',
+      snoozedKey: 'settingsAppearance.avatarFollowupSnoozedCompanion',
+      focusStartedKey: 'settingsAppearance.avatarFollowupFocusStartedCompanion',
+      focusStoppedKey: 'settingsAppearance.avatarFollowupFocusStoppedCompanion',
+      focusFinishedKey: 'settingsAppearance.avatarFollowupFocusFinishedCompanion',
+    },
+    assistant: {
+      badgeClass: 'bg-sky-500/12 text-sky-700',
+      primaryClass: 'bg-sky-500 hover:bg-sky-600 text-white',
+      surfaceClass: 'border-sky-200/95 bg-[linear-gradient(180deg,rgba(255,255,255,0.98),rgba(239,246,255,0.98))]',
+      strategyKey: 'settingsAppearance.avatarFollowupAssistantStrategy',
+      focusKey: 'settingsAppearance.avatarFollowupFocus',
+      rememberKey: 'settingsAppearance.avatarFollowupRemember',
+      snoozeKey: 'settingsAppearance.avatarFollowupSnooze',
+      timelineOpeningKey: 'settingsAppearance.avatarFollowupTimelineOpening',
+      rememberedKey: 'settingsAppearance.avatarFollowupRemembered',
+      snoozedKey: 'settingsAppearance.avatarFollowupSnoozed',
+      focusStartedKey: 'settingsAppearance.avatarFollowupFocusStarted',
+      focusStoppedKey: 'settingsAppearance.avatarFollowupFocusStopped',
+      focusFinishedKey: 'settingsAppearance.avatarFollowupFocusFinished',
+    },
+    coach: {
+      badgeClass: 'bg-amber-500/14 text-amber-800',
+      primaryClass: 'bg-amber-500 hover:bg-amber-600 text-slate-950',
+      surfaceClass: 'border-amber-200/95 bg-[linear-gradient(180deg,rgba(255,255,255,0.98),rgba(255,251,235,0.98))]',
+      strategyKey: 'settingsAppearance.avatarFollowupCoachStrategy',
+      focusKey: 'settingsAppearance.avatarFollowupFocusCoach',
+      rememberKey: 'settingsAppearance.avatarFollowupRememberCoach',
+      snoozeKey: 'settingsAppearance.avatarFollowupSnoozeCoach',
+      timelineOpeningKey: 'settingsAppearance.avatarFollowupTimelineOpeningCoach',
+      rememberedKey: 'settingsAppearance.avatarFollowupRememberedCoach',
+      snoozedKey: 'settingsAppearance.avatarFollowupSnoozedCoach',
+      focusStartedKey: 'settingsAppearance.avatarFollowupFocusStartedCoach',
+      focusStoppedKey: 'settingsAppearance.avatarFollowupFocusStoppedCoach',
+      focusFinishedKey: 'settingsAppearance.avatarFollowupFocusFinishedCoach',
+    },
+  };
+
+  function localizeBacklogNudgeMessage(message, nextLocale) {
+    if (!message?.startsWith('__avatar_backlog_nudge__:')) {
+      return null;
+    }
+
+    const [, persona = 'assistant', countRaw = '0'] = message.split(':');
+    const count = Number(countRaw) || 0;
+    const key =
+      persona === 'companion'
+        ? 'settingsAppearance.avatarNudgeBacklogCompanion'
+        : persona === 'coach'
+          ? 'settingsAppearance.avatarNudgeBacklogCoach'
+          : 'settingsAppearance.avatarNudgeBacklogAssistant';
+
+    return t(key, { count, locale: nextLocale });
+  }
+
   function localizeBubblePayload(payload, nextLocale = currentLocale) {
     if (!payload) {
       return null;
@@ -91,7 +189,8 @@
     }
 
     const localizedMessage =
-      RUNTIME_BUBBLE_MESSAGES[payload.message]?.[nextLocale]
+      localizeBacklogNudgeMessage(payload.message, nextLocale)
+      || RUNTIME_BUBBLE_MESSAGES[payload.message]?.[nextLocale]
       || payload.message;
 
     return {
@@ -100,7 +199,32 @@
     };
   }
 
-  $: bubble = localizeBubblePayload(bubbleSource, currentLocale);
+  function formatFocusCountdown(ms) {
+    const safeMs = Math.max(0, ms);
+    const totalSeconds = Math.ceil(safeMs / 1000);
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+    return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+  }
+
+  function buildFocusBubblePayload(session) {
+    if (!session) {
+      return null;
+    }
+
+    const countdown = formatFocusCountdown(session.endsAtMs - focusNowMs);
+    return {
+      message: t('settingsAppearance.avatarFollowupFocusActive', {
+        countdown,
+      }),
+      persistent: true,
+      tone: 'success',
+    };
+  }
+
+  $: focusBubble = buildFocusBubblePayload(focusSession);
+  $: bubble = localizeBubblePayload(focusBubble || bubbleSource, currentLocale);
+  $: followupCopy = buildFollowupCopy(followup);
 
   function clearBubble() {
     bubbleSource = null;
@@ -111,6 +235,10 @@
   function showBubble(payload) {
     if (payload?.clear) {
       clearBubble();
+      return;
+    }
+
+    if (focusSession && !payload?.persistent) {
       return;
     }
 
@@ -126,7 +254,267 @@
   }
 
   function dismissBubble() {
+    if (focusSession) {
+      stopFocusSession(true);
+      return;
+    }
     clearBubble();
+  }
+
+  function getFollowupPersonaLabelKey(persona) {
+    return FOLLOWUP_PERSONA_LABEL_KEY[persona] || FOLLOWUP_PERSONA_LABEL_KEY.assistant;
+  }
+
+  function getFollowupLeadKey(persona) {
+    return FOLLOWUP_LEAD_KEY[persona] || FOLLOWUP_LEAD_KEY.assistant;
+  }
+
+  function formatFollowupAge(hours) {
+    const normalizedHours = Number(hours) || 0;
+    if (normalizedHours <= 1) {
+      return t('settingsAppearance.avatarFollowupAgeRecent');
+    }
+    return t('settingsAppearance.avatarFollowupAgeHours', { count: normalizedHours });
+  }
+
+  function truncateFollowupTitle(title, maxLength = 34) {
+    const normalized = typeof title === 'string' ? title.trim() : '';
+    if (!normalized) {
+      return '';
+    }
+    if (normalized.length <= maxLength) {
+      return normalized;
+    }
+    return `${normalized.slice(0, Math.max(1, maxLength - 1)).trimEnd()}…`;
+  }
+
+  function buildFollowupCopy(payload) {
+    if (!payload) {
+      return null;
+    }
+
+    const theme =
+      FOLLOWUP_PERSONA_THEME[payload.persona] || FOLLOWUP_PERSONA_THEME.assistant;
+
+    return {
+      title: t('settingsAppearance.avatarFollowupTitle'),
+      personaLabel: t(getFollowupPersonaLabelKey(payload.persona)),
+      summary: t(getFollowupLeadKey(payload.persona), {
+        title: truncateFollowupTitle(payload.title),
+      }),
+      strategy: t(theme.strategyKey),
+      meta: [
+        payload.sourceApp,
+        payload.intentLabel,
+        formatFollowupAge(payload.sessionAgeHours),
+      ].filter(Boolean).join(' · '),
+      openTimeline: t('settingsAppearance.avatarFollowupOpenTimeline'),
+      focus: t(theme.focusKey),
+      remember: t(theme.rememberKey),
+      snooze: t(theme.snoozeKey),
+      dismissLabel: t('settingsAppearance.avatarFollowupDismiss'),
+      badgeClass: theme.badgeClass,
+      primaryClass: theme.primaryClass,
+      surfaceClass: theme.surfaceClass,
+    };
+  }
+
+  function getFollowupTheme(persona) {
+    return FOLLOWUP_PERSONA_THEME[persona] || FOLLOWUP_PERSONA_THEME.assistant;
+  }
+
+  function buildFollowupActionInput(action) {
+    if (!followup) {
+      return null;
+    }
+
+    return {
+      action,
+      projectKey: followup.projectKey,
+      title: followup.title,
+      date: followup.date,
+      sourceApp: followup.sourceApp,
+      sourceTitle: followup.sourceTitle,
+      persona: followup.persona,
+    };
+  }
+
+  async function submitFollowupAction(action) {
+    const input = buildFollowupActionInput(action);
+    if (!input) {
+      return null;
+    }
+
+    const snapshot = { ...followup };
+    await invoke('handle_avatar_followup_action', { input });
+    return snapshot;
+  }
+
+  function clearFollowup() {
+    followup = null;
+  }
+
+  function clearFocusTimer() {
+    clearInterval(focusTimer);
+    focusTimer = null;
+  }
+
+  function finishFocusSession() {
+    const completedSession = focusSession;
+    focusSession = null;
+    focusNowMs = 0;
+    clearFocusTimer();
+    if (!completedSession) {
+      return;
+    }
+    const theme = getFollowupTheme(state.avatarPersona);
+    showBubble({
+      message: t(theme.focusFinishedKey),
+      tone: 'success',
+      persistent: true,
+    });
+  }
+
+  function ensureFocusTicking() {
+    clearFocusTimer();
+    if (!focusSession) {
+      return;
+    }
+    focusNowMs = Date.now();
+    focusTimer = setInterval(() => {
+      focusNowMs = Date.now();
+      if (focusSession && focusNowMs >= focusSession.endsAtMs) {
+        finishFocusSession();
+      }
+    }, 1000);
+  }
+
+  function stopFocusSession(showEndedBubble = false) {
+    if (!focusSession) {
+      return;
+    }
+    focusSession = null;
+    focusNowMs = 0;
+    clearFocusTimer();
+    if (showEndedBubble) {
+      clearBubble();
+      const theme = getFollowupTheme(state.avatarPersona);
+      showBubble({
+        message: t(theme.focusStoppedKey),
+        tone: 'success',
+      });
+    }
+  }
+
+  async function startFollowupFocus() {
+    try {
+      const payload = await submitFollowupAction('focus');
+      if (!payload) {
+        return;
+      }
+
+      clearFollowup();
+      focusSession = {
+        projectKey: payload.projectKey,
+        title: payload.title,
+        endsAtMs: Date.now() + 25 * 60 * 1000,
+      };
+      clearBubble();
+      ensureFocusTicking();
+      const theme = getFollowupTheme(payload.persona);
+      showBubble({
+        message: t(theme.focusStartedKey),
+        tone: 'success',
+      });
+    } catch (e) {
+      console.error('桌宠开始专注失败:', e);
+      showBubble({
+        message: t('settingsAppearance.avatarFollowupActionFailed', { error: e }),
+        persistent: true,
+      });
+    }
+  }
+
+  async function openFollowupTimeline() {
+    try {
+      const payload = await submitFollowupAction('timeline');
+      if (!payload) {
+        return;
+      }
+
+      clearFollowup();
+      const theme = getFollowupTheme(payload.persona);
+      showBubble({
+        message: t(theme.timelineOpeningKey),
+        tone: 'success',
+      });
+      await invoke('show_main_window', { sourceWindowLabel: appWindow.label });
+      await emitTo('main', 'avatar-open-timeline', {
+        date: payload.date,
+        projectKey: payload.projectKey,
+        title: payload.title,
+      });
+    } catch (e) {
+      console.error('桌宠打开时间线失败:', e);
+      showBubble({
+        message: t('settingsAppearance.avatarFollowupActionFailed', { error: e }),
+        persistent: true,
+      });
+    }
+  }
+
+  async function rememberFollowup() {
+    try {
+      const payload = await submitFollowupAction('remember');
+      if (!payload) {
+        return;
+      }
+
+      clearFollowup();
+      const theme = getFollowupTheme(payload.persona);
+      showBubble({
+        message: t(theme.rememberedKey),
+        tone: 'success',
+      });
+    } catch (e) {
+      console.error('桌宠记为待跟进失败:', e);
+      showBubble({
+        message: t('settingsAppearance.avatarFollowupActionFailed', { error: e }),
+        persistent: true,
+      });
+    }
+  }
+
+  async function snoozeFollowup() {
+    try {
+      const payload = await submitFollowupAction('snooze');
+      if (!payload) {
+        return;
+      }
+
+      clearFollowup();
+      const theme = getFollowupTheme(payload.persona);
+      showBubble({
+        message: t(theme.snoozedKey),
+        tone: 'success',
+      });
+    } catch (e) {
+      console.error('桌宠稍后提醒失败:', e);
+      showBubble({
+        message: t('settingsAppearance.avatarFollowupActionFailed', { error: e }),
+        persistent: true,
+      });
+    }
+  }
+
+  async function dismissFollowup() {
+    try {
+      await submitFollowupAction('dismiss');
+    } catch (e) {
+      console.error('关闭桌宠继续提醒失败:', e);
+    } finally {
+      clearFollowup();
+    }
   }
 
   async function openMainWindow() {
@@ -189,6 +577,7 @@
   onMount(() => {
     let unlistenState = () => {};
     let unlistenBubble = () => {};
+    let unlistenFollowup = () => {};
     let unlistenInput = () => {};
     let unlistenMoved = () => {};
     let unlistenLocaleChanged = () => {};
@@ -238,7 +627,12 @@
         const nextState = event.payload;
         const stateChanged =
           nextState.mode !== state.mode || nextState.contextLabel !== state.contextLabel;
-        const stateBubble = getAvatarStateBubble(nextState.mode, currentLocale, nextState.contextLabel);
+        const stateBubble = getAvatarStateBubble(
+          nextState.mode,
+          currentLocale,
+          nextState.contextLabel,
+          nextState.avatarPersona,
+        );
         const transition = getAvatarTransitionMeta(
           state.mode,
           nextState.mode,
@@ -278,6 +672,10 @@
         showBubble(event.payload);
       });
 
+      unlistenFollowup = await appWindow.listen('avatar-followup-suggestion', (event) => {
+        followup = event.payload;
+      });
+
       unlistenInput = await appWindow.listen('avatar-input-changed', (event) => {
         const payload = event.payload ?? {};
         inputActivity = {
@@ -315,12 +713,14 @@
       clearTimeout(transitionTimer);
       clearTimeout(positionSaveTimer);
       clearTimeout(motionTimer);
+      clearFocusTimer();
       if (handleVisibilityChange) document.removeEventListener('visibilitychange', handleVisibilityChange);
       if (handleContextMenu) document.removeEventListener('contextmenu', handleContextMenu);
       if (handleKeydown) document.removeEventListener('keydown', handleKeydown, true);
       unsubscribeLocale();
       unlistenState();
       unlistenBubble();
+      unlistenFollowup();
       unlistenInput();
       unlistenLocaleChanged();
       unlistenMoved();
@@ -332,6 +732,16 @@
   <div class="absolute inset-x-0 top-0 h-[86px] overflow-visible">
     <AvatarPopover {bubble} onClose={dismissBubble} />
   </div>
+
+  <AvatarFollowupCard
+    followup={followup}
+    copy={followupCopy}
+    onTimeline={openFollowupTimeline}
+    onFocus={startFollowupFocus}
+    onRemember={rememberFollowup}
+    onSnooze={snoozeFollowup}
+    onDismiss={dismissFollowup}
+  />
 
   <div class="absolute inset-x-0 bottom-0 top-[78px] flex items-end justify-center overflow-visible">
     <div class="h-full w-[82%]">

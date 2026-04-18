@@ -177,6 +177,24 @@ pub struct TextModelProfile {
     pub last_test_message: Option<String>,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AvatarFollowupItem {
+    pub id: String,
+    pub title: String,
+    pub date: String,
+    pub source_app: String,
+    pub source_title: String,
+    pub project_key: String,
+    pub created_at: i64,
+    #[serde(default = "default_avatar_followup_status")]
+    pub status: String,
+}
+
+fn default_avatar_followup_status() -> String {
+    "open".to_string()
+}
+
 /// AI 提供商配置（旧版，保留用于向后兼容）
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct AiProviderConfig {
@@ -504,6 +522,12 @@ pub struct AppConfig {
     /// 桌宠官方预设
     #[serde(default = "default_avatar_preset")]
     pub avatar_preset: String,
+    /// 桌宠互动风格
+    #[serde(default = "default_avatar_persona")]
+    pub avatar_persona: String,
+    /// 通过桌宠手动记下的待跟进项
+    #[serde(default)]
+    pub avatar_followups: Vec<AvatarFollowupItem>,
     /// 桌宠窗口横向位置
     #[serde(default)]
     pub avatar_x: Option<i32>,
@@ -548,6 +572,9 @@ fn default_avatar_opacity() -> f64 {
 fn default_avatar_preset() -> String {
     "original-standard".to_string()
 }
+fn default_avatar_persona() -> String {
+    "assistant".to_string()
+}
 
 impl Default for AppConfig {
     fn default() -> Self {
@@ -587,6 +614,8 @@ impl Default for AppConfig {
             avatar_scale: default_avatar_scale(),
             avatar_opacity: default_avatar_opacity(),
             avatar_preset: default_avatar_preset(),
+            avatar_persona: default_avatar_persona(),
+            avatar_followups: Vec::new(),
             avatar_x: None,
             avatar_y: None,
             hide_decorations: false,
@@ -612,6 +641,8 @@ impl AppConfig {
         self.avatar_scale = normalize_avatar_scale(self.avatar_scale);
         self.avatar_opacity = normalize_avatar_opacity(self.avatar_opacity);
         self.avatar_preset = normalize_avatar_preset(&self.avatar_preset);
+        self.avatar_persona = normalize_avatar_persona(&self.avatar_persona);
+        normalize_avatar_followups(&mut self.avatar_followups);
         self.break_reminder_interval_minutes =
             normalize_break_reminder_interval_minutes(self.break_reminder_interval_minutes);
         self.daily_report_custom_prompt = self.daily_report_custom_prompt.trim().to_string();
@@ -900,6 +931,44 @@ fn normalize_avatar_preset(value: &str) -> String {
     }
 }
 
+fn normalize_avatar_persona(value: &str) -> String {
+    match value.trim() {
+        "companion" | "assistant" | "coach" => value.trim().to_string(),
+        _ => default_avatar_persona(),
+    }
+}
+
+fn normalize_avatar_followups(items: &mut Vec<AvatarFollowupItem>) {
+    let mut seen = std::collections::HashSet::new();
+    items.retain_mut(|item| {
+        item.id = item.id.trim().to_string();
+        item.title = item.title.trim().to_string();
+        item.date = item.date.trim().to_string();
+        item.source_app = item.source_app.trim().to_string();
+        item.source_title = item.source_title.trim().to_string();
+        item.project_key = item.project_key.trim().to_string();
+        item.status = match item.status.trim() {
+            "done" => "done".to_string(),
+            _ => default_avatar_followup_status(),
+        };
+
+        if item.title.is_empty() || item.project_key.is_empty() || item.date.is_empty() {
+            return false;
+        }
+
+        let dedupe_key = format!(
+            "{}::{}::{}",
+            item.project_key.to_lowercase(),
+            item.title.to_lowercase(),
+            item.status
+        );
+        seen.insert(dedupe_key)
+    });
+
+    items.sort_by(|a, b| b.created_at.cmp(&a.created_at).then_with(|| a.title.cmp(&b.title)));
+    items.truncate(200);
+}
+
 fn normalize_break_reminder_interval_minutes(value: u64) -> u64 {
     match value {
         30 | 45 | 50 | 60 | 90 | 120 => value,
@@ -926,9 +995,11 @@ fn normalize_optional_string(value: Option<String>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        default_avatar_opacity, default_avatar_preset, default_avatar_scale,
-        normalize_app_category_rules, normalize_avatar_opacity, normalize_avatar_preset,
-        normalize_avatar_scale, AiProvider, AppCategoryRule, AppConfig, ScreenshotDisplayMode,
+        default_avatar_opacity, default_avatar_persona, default_avatar_preset,
+        default_avatar_scale, normalize_app_category_rules, normalize_avatar_followups,
+        normalize_avatar_opacity, normalize_avatar_persona, normalize_avatar_preset,
+        normalize_avatar_scale, AiProvider, AppCategoryRule, AppConfig, AvatarFollowupItem,
+        ScreenshotDisplayMode,
         WebsiteSemanticRule,
     };
 
@@ -954,6 +1025,14 @@ mod tests {
 
         assert_eq!(config.avatar_preset, default_avatar_preset());
         assert_eq!(config.avatar_preset, "original-standard");
+    }
+
+    #[test]
+    fn 桌宠互动风格默认应为助手型() {
+        let config = AppConfig::default();
+
+        assert_eq!(config.avatar_persona, default_avatar_persona());
+        assert_eq!(config.avatar_persona, "assistant");
     }
 
     #[test]
@@ -1048,6 +1127,55 @@ mod tests {
         assert_eq!(normalize_avatar_preset(" minimal-office "), "minimal-office");
         assert_eq!(normalize_avatar_preset("wild-theme"), "original-standard");
         assert_eq!(normalize_avatar_preset(""), "original-standard");
+    }
+
+    #[test]
+    fn 桌宠互动风格应被规范到允许集合内() {
+        assert_eq!(normalize_avatar_persona("companion"), "companion");
+        assert_eq!(normalize_avatar_persona(" coach "), "coach");
+        assert_eq!(normalize_avatar_persona("other"), "assistant");
+    }
+
+    #[test]
+    fn 桌宠手动待跟进应去重并清理非法项() {
+        let mut items = vec![
+            AvatarFollowupItem {
+                id: " 1 ".to_string(),
+                title: " 修复支付页回调 ".to_string(),
+                date: "2026-04-18".to_string(),
+                source_app: "Cursor".to_string(),
+                source_title: "payments.ts".to_string(),
+                project_key: "payments".to_string(),
+                created_at: 20,
+                status: "open".to_string(),
+            },
+            AvatarFollowupItem {
+                id: "2".to_string(),
+                title: "修复支付页回调".to_string(),
+                date: "2026-04-18".to_string(),
+                source_app: "Cursor".to_string(),
+                source_title: "payments.ts".to_string(),
+                project_key: "payments".to_string(),
+                created_at: 10,
+                status: "open".to_string(),
+            },
+            AvatarFollowupItem {
+                id: "3".to_string(),
+                title: "   ".to_string(),
+                date: "2026-04-18".to_string(),
+                source_app: "Cursor".to_string(),
+                source_title: "payments.ts".to_string(),
+                project_key: "payments".to_string(),
+                created_at: 30,
+                status: "open".to_string(),
+            },
+        ];
+
+        normalize_avatar_followups(&mut items);
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].id, "1");
+        assert_eq!(items[0].title, "修复支付页回调");
     }
 
     #[test]

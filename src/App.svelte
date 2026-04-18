@@ -1,6 +1,6 @@
 <script>
-  import { onMount } from 'svelte';
-  import Router from 'svelte-spa-router';
+  import { onMount, tick } from 'svelte';
+  import Router, { push } from 'svelte-spa-router';
   import Sidebar from './lib/components/Sidebar.svelte';
   import Toast from './lib/components/Toast.svelte';
   import ConfirmDialog from './lib/components/ConfirmDialog.svelte';
@@ -261,6 +261,26 @@
         cache.setConfig(event.payload);
       });
 
+      const unlistenAvatarTimeline = await listen('avatar-open-timeline', async (event) => {
+        const payload = event.payload ?? {};
+        const nextDate = typeof payload.date === 'string' ? payload.date.trim() : '';
+
+        try {
+          await push('/timeline');
+          if (nextDate) {
+            window.history.replaceState(
+              window.history.state,
+              '',
+              `/timeline?date=${encodeURIComponent(nextDate)}`
+            );
+          }
+          await tick();
+          window.dispatchEvent(new CustomEvent('timeline-focus-date', { detail: payload }));
+        } catch (e) {
+          console.error('桌宠跳转时间线失败:', e);
+        }
+      });
+
       // 监听背景图更新事件（来自设置页，实时预览）
       const handleBgChange = (e) => handleBackgroundChanged(e);
       window.addEventListener('background-changed', handleBgChange);
@@ -350,6 +370,7 @@
         unlisten();
         unlistenRecordingState();
         unlistenConfigChanged();
+        unlistenAvatarTimeline();
         unsubscribeLocale();
         unsubscribeCache();
         clearTimeout(autoUpdateTimer);
