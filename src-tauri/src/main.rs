@@ -2784,6 +2784,7 @@ async fn main() {
 
     // 加载配置
     let config_path = data_dir.join("config.json");
+    #[allow(unused_mut)]
     let mut config = AppConfig::load(&config_path).unwrap_or_else(|e| {
         log::warn!("加载配置失败，使用默认配置: {e}");
         AppConfig::default()

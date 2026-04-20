@@ -111,7 +111,7 @@ fn read_user_process_env(uid: &str) -> std::collections::HashMap<String, String>
         let pid_dir = entry.path();
 
         // 检查是否是进程目录
-        let file_name = match pid_dir.file_name().and_then(|n| n.to_str()) {
+        let _file_name = match pid_dir.file_name().and_then(|n| n.to_str()) {
             Some(name) if name.chars().all(|c| c.is_ascii_digit()) => name,
             _ => continue,
         };
