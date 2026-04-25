@@ -9,10 +9,8 @@
   const dispatch = createEventDispatcher();
   $: currentLocale = $locale;
   let workHours = '—';
-
-  // 开机自启动状态（独立于 config，由系统 API 驱动）
   let autoStartEnabled = false;
-  
+
   onMount(async () => {
     try {
       autoStartEnabled = await invoke('is_autostart_enabled');
@@ -30,22 +28,16 @@
     }
   });
 
-  // 小时选项 (0-23)
   const hours = Array.from({ length: 24 }, (_, i) => i);
-  // 分钟选项 (0, 15, 30, 45)
   const minutes = [0, 15, 30, 45];
 
-  // 解析工作时间
   $: startHour = config.work_start_hour ?? 9;
   $: startMinute = config.work_start_minute ?? 0;
   $: endHour = config.work_end_hour ?? 18;
   $: endMinute = config.work_end_minute ?? 0;
-
-  // 格式化为 HH:MM
   $: startTimeDisplay = `${String(startHour).padStart(2, '0')}:${String(startMinute).padStart(2, '0')}`;
   $: endTimeDisplay = `${String(endHour).padStart(2, '0')}:${String(endMinute).padStart(2, '0')}`;
 
-  // 工作时长
   $: {
     currentLocale;
     const startTotal = startHour * 60 + startMinute;
@@ -76,7 +68,6 @@
     dispatch('change', config);
   }
 
-  // 开机自启动切换
   async function toggleAutoStart() {
     const targetState = !autoStartEnabled;
     try {
@@ -102,7 +93,6 @@
     }
   }
 
-  // Dock 图标
   async function toggleDockIcon() {
     config.hide_dock_icon = !config.hide_dock_icon;
     try {
@@ -125,9 +115,6 @@
     } catch (e) {
       console.error('保存启动模式失败:', e);
     }
-    // 若自启动已启用，重注册让注册表 launch args 反映最新 silent 选择：
-    // silent=true 写入 --autostart --hidden，silent=false 只写 --autostart，
-    // 下次开机由 args 直接决定显/隐，不再回头读 config。
     if (autoStartEnabled) {
       try {
         await invoke('enable_autostart', { silent: silentMode });
@@ -137,16 +124,13 @@
     }
     dispatch('change', config);
   }
-
 </script>
 
-<!-- 基本设置 -->
 <div class="settings-card" data-locale={currentLocale}>
   <h3 class="settings-card-title">{t('settingsGeneral.title')}</h3>
   <p class="settings-card-desc">{t('settingsGeneral.description')}</p>
 
   <div class="settings-section">
-    <!-- 工作时间 -->
     <div class="settings-block">
       <div class="flex flex-wrap items-baseline gap-x-3 gap-y-1">
         <span class="settings-text">{t('settingsGeneral.workTime')}</span>
@@ -154,7 +138,6 @@
       </div>
 
       <div class="flex items-center gap-3">
-        <!-- 开始时间 -->
         <div class="control-inline">
           <span class="settings-subtle">{t('settingsGeneral.from')}</span>
           <input
@@ -170,7 +153,6 @@
 
         <span class="text-slate-300 dark:text-slate-600">—</span>
 
-        <!-- 结束时间 -->
         <div class="control-inline">
           <span class="settings-subtle">{t('settingsGeneral.to')}</span>
           <input
@@ -189,7 +171,6 @@
 
     <hr class="border-slate-200 dark:border-slate-700" />
 
-    <!-- 开机自启动 -->
     <div class="flex items-center justify-between">
       <div>
         <div class="settings-text">{t('settingsGeneral.autoStart')}</div>
@@ -227,7 +208,6 @@
 
     <hr class="border-slate-200 dark:border-slate-700" />
 
-    <!-- Dock 图标 -->
     <div class="flex items-center justify-between">
       <div>
         <div class="settings-text">{t('settingsGeneral.hideDockIcon')}</div>
@@ -255,7 +235,6 @@
         <span class="switch-thumb {config.lightweight_mode ? 'translate-x-5' : 'translate-x-0'}"></span>
       </button>
     </div>
-
   </div>
 </div>
 

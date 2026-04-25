@@ -8,6 +8,7 @@
   import SettingsGeneral from './components/SettingsGeneral.svelte';
   import SettingsAI from './components/SettingsAI.svelte';
   import SettingsAvatar from './components/SettingsAvatar.svelte';
+  import SettingsNodeGateway from './components/SettingsNodeGateway.svelte';
   import SettingsSystem from './components/SettingsSystem.svelte';
   import SettingsPrivacy from './components/SettingsPrivacy.svelte';
   import SettingsStorage from './components/SettingsStorage.svelte';
@@ -32,9 +33,10 @@
   const tabs = [
     { id: 'general', labelKey: 'settings.tabs.general', icon: 'general' },
     { id: 'ai', labelKey: 'settings.tabs.ai', icon: 'ai' },
-    { id: 'avatar', labelKey: 'settings.tabs.avatar', icon: 'avatar' },
+    { id: 'avatar', labelKey: 'settings.tabs.avatar', icon: 'avatar', beta: true },
     { id: 'privacy', labelKey: 'settings.tabs.privacy', icon: 'privacy' },
     { id: 'storage', labelKey: 'settings.tabs.storage', icon: 'storage' },
+    { id: 'node', labelKey: 'settings.tabs.node', icon: 'node', beta: true },
   ];
 
   // 加载配置
@@ -74,6 +76,34 @@
       }
       if (typeof config.daily_report_export_dir !== 'string' && config.daily_report_export_dir !== null) {
         config.daily_report_export_dir = null;
+      }
+      if (typeof config.localhost_api_enabled !== 'boolean') {
+        config.localhost_api_enabled = false;
+      }
+      if (!Number.isInteger(config.localhost_api_port) || config.localhost_api_port <= 0) {
+        config.localhost_api_port = 47831;
+      }
+      if (!config.node_gateway || typeof config.node_gateway !== 'object') {
+        config.node_gateway = {
+          control_plane_enabled: false,
+          control_plane_endpoint: null,
+          device_name: null,
+        };
+      }
+      if (typeof config.node_gateway.control_plane_enabled !== 'boolean') {
+        config.node_gateway.control_plane_enabled = false;
+      }
+      if (
+        typeof config.node_gateway.control_plane_endpoint !== 'string' &&
+        config.node_gateway.control_plane_endpoint !== null
+      ) {
+        config.node_gateway.control_plane_endpoint = null;
+      }
+      if (
+        typeof config.node_gateway.device_name !== 'string' &&
+        config.node_gateway.device_name !== null
+      ) {
+        config.node_gateway.device_name = null;
       }
       if (!config.vision_model) {
         config.vision_model = { provider: 'ollama', endpoint: 'http://localhost:11434', api_key: null, model: 'llava' };
@@ -277,6 +307,8 @@
                   <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" /><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" /></svg>
                 {:else if tab.icon === 'ai'}
                   <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" /></svg>
+                {:else if tab.icon === 'node'}
+                  <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M5 7h14M5 12h14M5 17h10" /><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M4 5a2 2 0 012-2h12a2 2 0 012 2v14a2 2 0 01-2 2H6a2 2 0 01-2-2V5z" /></svg>
                 {:else if tab.icon === 'avatar'}
                   <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M7.5 9.5l1.5-3 3 2 3-2 1.5 3M7 14.5c0-2.5 2.239-4.5 5-4.5s5 2 5 4.5S14.761 19 12 19s-5-2-5-4.5z" /><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M10 14h.01M14 14h.01M10.5 16.5c.6.5 1 .75 1.5.75s.9-.25 1.5-.75" /></svg>
                 {:else if tab.icon === 'privacy'}
@@ -285,7 +317,14 @@
                   <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4" /></svg>
                 {/if}
               </span>
-              <span>{t(tab.labelKey)}</span>
+              <span class="inline-flex items-center gap-2">
+                <span>{t(tab.labelKey)}</span>
+                {#if tab.beta}
+                  <span class="inline-flex items-center rounded-full border border-amber-200 bg-amber-50 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-[0.08em] text-amber-700 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-200">
+                    {t('settings.tabs.beta')}
+                  </span>
+                {/if}
+              </span>
             </button>
           {/each}
         </div>
@@ -293,6 +332,8 @@
         <div class="settings-stage-shell">
         {#if activeTab === 'general'}
           <SettingsGeneral bind:config on:change={() => {}} />
+        {:else if activeTab === 'node'}
+          <SettingsNodeGateway bind:config on:change={() => {}} />
         {:else if activeTab === 'ai'}
           <div class="settings-card settings-ai-shell">
             <h3 class="settings-card-title">{t('settings.aiCardTitle')}</h3>

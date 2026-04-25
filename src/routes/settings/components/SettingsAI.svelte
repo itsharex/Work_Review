@@ -130,6 +130,7 @@
   let modelsError = '';
   let modelsHint = '';
   let selectedModel = '';
+  const MANUAL_MODEL_VALUE = '__manual_model__';
 
   const unsubscribe = aiStore.subscribe(state => {
     textTestStatus = state.textTestStatus;
@@ -146,7 +147,9 @@
   $: requiresApiKey = currentProvider?.requires_api_key ?? true;
   $: selectedModel = fetchedModels.includes(config?.text_model?.model || '')
     ? config.text_model.model
-    : '';
+    : hasManualModelOutsideList()
+      ? MANUAL_MODEL_VALUE
+      : '';
 
   // 是否选择了 AI 增强模式（决定是否展开配置面板）
   $: isAiMode = config.ai_mode === 'summary';
@@ -264,9 +267,10 @@
     );
   }
 
-  function handleModelSelect() {
-    if (!selectedModel) return;
-    config.text_model.model = selectedModel;
+  function handleModelSelect(event) {
+    const model = event?.target?.value || '';
+    if (!model || model === MANUAL_MODEL_VALUE) return;
+    config.text_model.model = model;
     handleChange();
   }
 
@@ -303,10 +307,7 @@
       );
       if (
         fetchedModels.length > 0 &&
-        (
-          !config.text_model.model ||
-          !fetchedModels.includes(config.text_model.model)
-        )
+        !config.text_model.model?.trim()
       ) {
         config.text_model.model = fetchedModels[0];
         dispatch('change', config);
@@ -504,30 +505,28 @@
       <div class="flex items-end gap-2">
         <div class="flex-1">
           <label for="ai-model" class="settings-label mb-1.5">{t('settingsAI.model')}</label>
-          {#key `${selectedModel}|${config?.text_model?.model || ''}|${fetchedModels.join('|')}|${modelsLoading}`}
-            <select
-              id="ai-model"
-              bind:value={selectedModel}
-              on:change={handleModelSelect}
-              class="control-input"
-              disabled={modelsLoading || fetchedModels.length === 0}
-            >
-              {#if fetchedModels.length === 0}
-                <option value="">
-                  {getModelFallbackOptionLabel()}
+          <select
+            id="ai-model"
+            value={selectedModel}
+            on:change={handleModelSelect}
+            class="control-input"
+            disabled={modelsLoading || fetchedModels.length === 0}
+          >
+            {#if fetchedModels.length === 0}
+              <option value="">
+                {getModelFallbackOptionLabel()}
+              </option>
+            {:else}
+              {#if hasManualModelOutsideList()}
+                <option value={MANUAL_MODEL_VALUE} disabled>
+                  {t('settingsAI.manualModelMissing')}
                 </option>
-              {:else}
-                {#if hasManualModelOutsideList()}
-                  <option value="" disabled>
-                    {t('settingsAI.manualModelMissing')}
-                  </option>
-                {/if}
-                {#each fetchedModels as model (model)}
-                  <option value={model}>{model}</option>
-                {/each}
               {/if}
-            </select>
-          {/key}
+              {#each fetchedModels as model (model)}
+                <option value={model}>{model}</option>
+              {/each}
+            {/if}
+          </select>
         </div>
 
         <button

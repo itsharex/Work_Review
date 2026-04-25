@@ -317,9 +317,6 @@
       <div>
         <div class="flex items-center gap-2">
           <div class="settings-text">{t('settingsAppearance.avatar')}</div>
-          <span class="rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.08em] text-amber-700 dark:border-amber-400/30 dark:bg-amber-500/10 dark:text-amber-200">
-            Beta
-          </span>
         </div>
         <div class="settings-muted mt-0.5">{t('settingsAppearance.avatarDesc')}</div>
         <div class="settings-muted mt-1 text-[12px]">{t('settingsAppearance.avatarBetaHint')}</div>

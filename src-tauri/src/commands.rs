@@ -2593,7 +2593,9 @@ fn manual_followups_in_range(
         .iter()
         .filter(|item| item.status == "open")
         .filter(|item| {
-            date_from.map(|start| item.date.as_str() >= start).unwrap_or(true)
+            date_from
+                .map(|start| item.date.as_str() >= start)
+                .unwrap_or(true)
                 && date_to.map(|end| item.date.as_str() <= end).unwrap_or(true)
         })
         .cloned()
@@ -2639,7 +2641,10 @@ fn merge_manual_followups_into_todos(
             .then_with(|| a.title.cmp(&b.title))
     });
     extracted.items.truncate(20);
-    extracted.summary = format!("共整理出 {} 条待跟进项（含桌宠手动加入）。", extracted.items.len());
+    extracted.summary = format!(
+        "共整理出 {} 条待跟进项（含桌宠手动加入）。",
+        extracted.items.len()
+    );
     extracted
 }
 
@@ -2982,13 +2987,12 @@ pub async fn extract_todo_items(
 }
 
 /// 生成日报
-#[tauri::command]
-pub async fn generate_report(
+pub(crate) async fn generate_report_inner(
     date: String,
     force: Option<bool>,
     locale: Option<String>,
-    app: AppHandle,
-    state: State<'_, Arc<Mutex<AppState>>>,
+    app: &AppHandle,
+    state: &Arc<Mutex<AppState>>,
 ) -> Result<String, AppError> {
     let report_locale = AppLocale::from_option(locale.as_deref());
     let report_locale_code = report_locale.as_code();
@@ -3140,12 +3144,22 @@ pub async fn generate_report(
     Ok(report)
 }
 
-/// 获取已保存的日报
 #[tauri::command]
-pub async fn get_saved_report(
+pub async fn generate_report(
+    date: String,
+    force: Option<bool>,
+    locale: Option<String>,
+    app: AppHandle,
+    state: State<'_, Arc<Mutex<AppState>>>,
+) -> Result<String, AppError> {
+    generate_report_inner(date, force, locale, &app, state.inner()).await
+}
+
+/// 获取已保存的日报
+pub(crate) fn get_saved_report_inner(
     date: String,
     locale: Option<String>,
-    state: State<'_, Arc<Mutex<AppState>>>,
+    state: &Arc<Mutex<AppState>>,
 ) -> Result<Option<DailyReport>, AppError> {
     let report_locale = AppLocale::from_option(locale.as_deref());
     let state = state.lock().map_err(|e| AppError::Unknown(e.to_string()))?;
@@ -3155,11 +3169,19 @@ pub async fn get_saved_report(
 }
 
 #[tauri::command]
-pub async fn export_report_markdown(
+pub async fn get_saved_report(
+    date: String,
+    locale: Option<String>,
+    state: State<'_, Arc<Mutex<AppState>>>,
+) -> Result<Option<DailyReport>, AppError> {
+    get_saved_report_inner(date, locale, state.inner())
+}
+
+pub(crate) fn export_report_markdown_inner(
     date: String,
     content: Option<String>,
     export_dir: Option<String>,
-    state: State<'_, Arc<Mutex<AppState>>>,
+    state: &Arc<Mutex<AppState>>,
 ) -> Result<String, AppError> {
     let (export_dir, saved_content) = {
         let state = state.lock().map_err(|e| AppError::Unknown(e.to_string()))?;
@@ -3201,11 +3223,66 @@ pub async fn export_report_markdown(
         .to_string())
 }
 
+#[tauri::command]
+pub async fn export_report_markdown(
+    date: String,
+    content: Option<String>,
+    export_dir: Option<String>,
+    state: State<'_, Arc<Mutex<AppState>>>,
+) -> Result<String, AppError> {
+    export_report_markdown_inner(date, content, export_dir, state.inner())
+}
+
 /// 获取配置
 #[tauri::command]
 pub async fn get_config(state: State<'_, Arc<Mutex<AppState>>>) -> Result<AppConfig, AppError> {
     let state = state.lock().map_err(|e| AppError::Unknown(e.to_string()))?;
     Ok(state.config.clone())
+}
+
+#[tauri::command]
+pub async fn get_localhost_api_status(
+    state: State<'_, Arc<Mutex<AppState>>>,
+) -> Result<crate::localhost_api::LocalhostApiStatusPayload, AppError> {
+    crate::localhost_api::get_localhost_api_status(state.inner())
+}
+
+#[tauri::command]
+pub async fn get_node_gateway_status(
+    state: State<'_, Arc<Mutex<AppState>>>,
+) -> Result<crate::node_gateway::NodeGatewayStatusPayload, AppError> {
+    crate::node_gateway::get_node_gateway_status(state.inner())
+}
+
+#[tauri::command]
+pub async fn register_node_gateway(
+    state: State<'_, Arc<Mutex<AppState>>>,
+) -> Result<crate::node_gateway::NodeGatewayStatusPayload, AppError> {
+    crate::node_gateway::register_node_gateway(state.inner()).await
+}
+
+#[tauri::command]
+pub async fn send_node_gateway_heartbeat(
+    state: State<'_, Arc<Mutex<AppState>>>,
+) -> Result<crate::node_gateway::NodeGatewayStatusPayload, AppError> {
+    crate::node_gateway::send_node_gateway_heartbeat(state.inner()).await
+}
+
+#[tauri::command]
+pub async fn reveal_localhost_api_token(
+    state: State<'_, Arc<Mutex<AppState>>>,
+) -> Result<String, AppError> {
+    crate::localhost_api::reveal_localhost_api_token(state.inner())
+}
+
+#[tauri::command]
+pub async fn rotate_localhost_api_token(
+    app: AppHandle,
+    state: State<'_, Arc<Mutex<AppState>>>,
+) -> Result<String, AppError> {
+    let token = crate::localhost_api::rotate_localhost_api_token(state.inner())?;
+    crate::localhost_api::sync_localhost_api_runtime(&app, state.inner())?;
+    Ok(token)
 }
 
 pub(crate) fn persist_app_config(
@@ -3288,6 +3365,8 @@ pub(crate) fn persist_app_config(
     if dock_visibility_changed {
         crate::sync_effective_dock_visibility(&app);
     }
+
+    crate::localhost_api::sync_localhost_api_runtime(&app, state)?;
     crate::emit_config_changed(&app, &config);
 
     log::info!("配置已保存");
@@ -4330,7 +4409,9 @@ pub async fn handle_avatar_followup_action(
 ) -> Result<serde_json::Value, AppError> {
     let project_key = input.project_key.trim().to_string();
     if project_key.is_empty() {
-        return Err(AppError::Unknown("缺少项目标识，无法处理桌宠待跟进动作".to_string()));
+        return Err(AppError::Unknown(
+            "缺少项目标识，无法处理桌宠待跟进动作".to_string(),
+        ));
     }
 
     let action = match input.action.trim() {
@@ -4341,7 +4422,10 @@ pub async fn handle_avatar_followup_action(
         _ => crate::avatar_followup::AvatarFollowupAction::Dismiss,
     };
 
-    if matches!(action, crate::avatar_followup::AvatarFollowupAction::Remember) {
+    if matches!(
+        action,
+        crate::avatar_followup::AvatarFollowupAction::Remember
+    ) {
         let mut config = {
             let state = state.lock().map_err(|e| AppError::Unknown(e.to_string()))?;
             state.config.clone()
@@ -6159,9 +6243,8 @@ pub async fn open_permission_settings(permission: String) -> Result<(), AppError
             _ => {}
         }
 
-        let target = macos_permission_settings_url(&permission).ok_or_else(|| {
-            AppError::Unknown(format!("不支持的权限类型: {}", permission))
-        })?;
+        let target = macos_permission_settings_url(&permission)
+            .ok_or_else(|| AppError::Unknown(format!("不支持的权限类型: {}", permission)))?;
 
         std::process::Command::new("open")
             .arg(target)

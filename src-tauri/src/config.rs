@@ -425,6 +425,30 @@ impl Default for StorageConfig {
     }
 }
 
+pub const DEFAULT_LOCALHOST_API_PORT: u16 = 47_831;
+
+fn default_localhost_api_port() -> u16 {
+    DEFAULT_LOCALHOST_API_PORT
+}
+
+fn normalize_localhost_api_port(port: u16) -> u16 {
+    if port == 0 {
+        DEFAULT_LOCALHOST_API_PORT
+    } else {
+        port
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct NodeGatewayConfig {
+    #[serde(default)]
+    pub control_plane_enabled: bool,
+    #[serde(default)]
+    pub control_plane_endpoint: Option<String>,
+    #[serde(default)]
+    pub device_name: Option<String>,
+}
+
 /// 应用配置
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct AppConfig {
@@ -464,6 +488,15 @@ pub struct AppConfig {
     /// 日报 Markdown 导出目录
     #[serde(default)]
     pub daily_report_export_dir: Option<String>,
+    /// 是否启用本地 localhost API
+    #[serde(default)]
+    pub localhost_api_enabled: bool,
+    /// 本地 localhost API 端口
+    #[serde(default = "default_localhost_api_port")]
+    pub localhost_api_port: u16,
+    /// 设备节点 / 控制面配置
+    #[serde(default)]
+    pub node_gateway: NodeGatewayConfig,
     /// 是否开机自启
     pub auto_start: bool,
     /// 开机自启动时是否静默驻留而不显示主界面
@@ -592,6 +625,9 @@ impl Default for AppConfig {
             storage: StorageConfig::default(),
             daily_report_custom_prompt: String::new(),
             daily_report_export_dir: None,
+            localhost_api_enabled: false,
+            localhost_api_port: DEFAULT_LOCALHOST_API_PORT,
+            node_gateway: NodeGatewayConfig::default(),
             auto_start: false,
             auto_start_silent: false,
             macos_screen_capture_permission_prompted: false,
@@ -631,11 +667,11 @@ impl AppConfig {
     pub fn normalize(&mut self) {
         self.migrate_legacy_config();
         normalize_custom_categories(&mut self.custom_categories);
-        normalize_app_category_rules(
-            &mut self.app_category_rules,
-            &self.custom_categories,
+        normalize_app_category_rules(&mut self.app_category_rules, &self.custom_categories);
+        normalize_website_semantic_rules(
+            &mut self.website_semantic_rules,
+            &self.custom_semantic_categories,
         );
-        normalize_website_semantic_rules(&mut self.website_semantic_rules, &self.custom_semantic_categories);
         normalize_custom_semantic_categories(&mut self.custom_semantic_categories);
         self.screenshot_interval = normalize_screenshot_interval(self.screenshot_interval);
         self.avatar_scale = normalize_avatar_scale(self.avatar_scale);
@@ -648,6 +684,11 @@ impl AppConfig {
         self.daily_report_custom_prompt = self.daily_report_custom_prompt.trim().to_string();
         self.daily_report_export_dir =
             normalize_optional_string(self.daily_report_export_dir.take());
+        self.localhost_api_port = normalize_localhost_api_port(self.localhost_api_port);
+        self.node_gateway.control_plane_endpoint =
+            normalize_optional_string(self.node_gateway.control_plane_endpoint.take());
+        self.node_gateway.device_name =
+            normalize_optional_string(self.node_gateway.device_name.take());
         self.sync_text_model_profiles();
     }
 
@@ -816,7 +857,10 @@ fn normalize_custom_categories(categories: &mut Vec<CustomCategory>) {
     });
 }
 
-fn normalize_app_category_rules(rules: &mut Vec<AppCategoryRule>, custom_categories: &[CustomCategory]) {
+fn normalize_app_category_rules(
+    rules: &mut Vec<AppCategoryRule>,
+    custom_categories: &[CustomCategory],
+) {
     use std::collections::HashSet;
 
     let mut normalized_rules = Vec::new();
@@ -845,10 +889,16 @@ fn normalize_app_category_rules(rules: &mut Vec<AppCategoryRule>, custom_categor
     *rules = normalized_rules;
 }
 
-fn normalize_website_semantic_rules(rules: &mut Vec<WebsiteSemanticRule>, custom_semantic_categories: &[CustomSemanticCategory]) {
+fn normalize_website_semantic_rules(
+    rules: &mut Vec<WebsiteSemanticRule>,
+    custom_semantic_categories: &[CustomSemanticCategory],
+) {
     use std::collections::HashSet;
 
-    let custom_keys: Vec<String> = custom_semantic_categories.iter().map(|c| c.key.clone()).collect();
+    let custom_keys: Vec<String> = custom_semantic_categories
+        .iter()
+        .map(|c| c.key.clone())
+        .collect();
     let mut normalized_rules = Vec::new();
     let mut seen = HashSet::new();
 
@@ -884,10 +934,21 @@ fn normalize_website_semantic_rules(rules: &mut Vec<WebsiteSemanticRule>, custom
 }
 
 pub(crate) fn is_valid_builtin_semantic_category(category: &str) -> bool {
-    matches!(category,
-        "编码开发" | "内容撰写" | "资料阅读" | "资料调研" | "任务规划"
-        | "设计创作" | "AI 协作" | "即时聊天" | "会议沟通" | "视频内容"
-        | "音乐音频" | "休息娱乐" | "未知活动"
+    matches!(
+        category,
+        "编码开发"
+            | "内容撰写"
+            | "资料阅读"
+            | "资料调研"
+            | "任务规划"
+            | "设计创作"
+            | "AI 协作"
+            | "即时聊天"
+            | "会议沟通"
+            | "视频内容"
+            | "音乐音频"
+            | "休息娱乐"
+            | "未知活动"
     )
 }
 
@@ -965,7 +1026,11 @@ fn normalize_avatar_followups(items: &mut Vec<AvatarFollowupItem>) {
         seen.insert(dedupe_key)
     });
 
-    items.sort_by(|a, b| b.created_at.cmp(&a.created_at).then_with(|| a.title.cmp(&b.title)));
+    items.sort_by(|a, b| {
+        b.created_at
+            .cmp(&a.created_at)
+            .then_with(|| a.title.cmp(&b.title))
+    });
     items.truncate(200);
 }
 
@@ -999,8 +1064,7 @@ mod tests {
         default_avatar_scale, normalize_app_category_rules, normalize_avatar_followups,
         normalize_avatar_opacity, normalize_avatar_persona, normalize_avatar_preset,
         normalize_avatar_scale, AiProvider, AppCategoryRule, AppConfig, AvatarFollowupItem,
-        ScreenshotDisplayMode,
-        WebsiteSemanticRule,
+        ScreenshotDisplayMode, WebsiteSemanticRule, DEFAULT_LOCALHOST_API_PORT,
     };
 
     #[test]
@@ -1124,7 +1188,10 @@ mod tests {
     #[test]
     fn 桌宠预设应被规范到官方预设集合内() {
         assert_eq!(normalize_avatar_preset("keyboard-focus"), "keyboard-focus");
-        assert_eq!(normalize_avatar_preset(" minimal-office "), "minimal-office");
+        assert_eq!(
+            normalize_avatar_preset(" minimal-office "),
+            "minimal-office"
+        );
         assert_eq!(normalize_avatar_preset("wild-theme"), "original-standard");
         assert_eq!(normalize_avatar_preset(""), "original-standard");
     }
@@ -1247,5 +1314,34 @@ mod tests {
 
         assert_eq!(config.daily_report_custom_prompt, "输出需要更偏周报风格");
         assert_eq!(config.daily_report_export_dir, None);
+    }
+
+    #[test]
+    fn 本地api默认应关闭并使用固定默认端口() {
+        let config = AppConfig::default();
+
+        assert!(!config.localhost_api_enabled);
+        assert_eq!(config.localhost_api_port, DEFAULT_LOCALHOST_API_PORT);
+    }
+
+    #[test]
+    fn 本地api端口应在规范化时回退到安全默认值() {
+        let mut config = AppConfig {
+            localhost_api_port: 0,
+            ..AppConfig::default()
+        };
+
+        config.normalize();
+
+        assert_eq!(config.localhost_api_port, DEFAULT_LOCALHOST_API_PORT);
+    }
+
+    #[test]
+    fn 节点网关默认应关闭控制面并且不预填远端地址() {
+        let config = AppConfig::default();
+
+        assert!(!config.node_gateway.control_plane_enabled);
+        assert_eq!(config.node_gateway.control_plane_endpoint, None);
+        assert_eq!(config.node_gateway.device_name, None);
     }
 }

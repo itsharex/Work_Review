@@ -52,6 +52,9 @@
   let motionBeat = 0;
   let motionTimer = null;
   let positionSaveTimer = null;
+  let sizeCorrectionTimer = null;
+  let resizeGuardTimer = null;
+  let suppressNextResizeCorrection = false;
   let lastSavedPositionKey = null;
   let unsubscribeLocale = () => {};
   let handleVisibilityChange = null;
@@ -237,8 +240,10 @@
   $: followupCopy = buildFollowupCopy(followup);
   $: syncAvatarExpansion(followup != null);
 
-  async function syncAvatarExpansion(expanded) {
-    if (avatarExpanded === expanded) {
+  async function syncAvatarExpansion(expanded, options = {}) {
+    const { force = false } = options;
+
+    if (!force && avatarExpanded === expanded) {
       return;
     }
     const previous = avatarExpanded;
@@ -246,9 +251,31 @@
     try {
       await invoke('set_avatar_window_expanded', { expanded });
     } catch (e) {
-      avatarExpanded = previous;
+      if (!force) {
+        avatarExpanded = previous;
+      }
       console.error('更新桌宠窗口尺寸失败:', e);
     }
+  }
+
+  function scheduleAvatarSizeCorrection() {
+    if (suppressNextResizeCorrection) {
+      return;
+    }
+
+    clearTimeout(sizeCorrectionTimer);
+    sizeCorrectionTimer = setTimeout(async () => {
+      const expanded = avatarExpanded === null ? followup != null : avatarExpanded;
+      suppressNextResizeCorrection = true;
+      clearTimeout(resizeGuardTimer);
+
+      await syncAvatarExpansion(expanded, { force: true });
+
+      resizeGuardTimer = setTimeout(() => {
+        suppressNextResizeCorrection = false;
+        resizeGuardTimer = null;
+      }, 180);
+    }, 120);
   }
 
   function clearBubble() {
@@ -608,6 +635,7 @@
     let unlistenFollowup = () => {};
     let unlistenInput = () => {};
     let unlistenMoved = () => {};
+    let unlistenResized = () => {};
     let unlistenLocaleChanged = () => {};
     initializeLocale();
     unsubscribeLocale = locale.subscribe((nextLocale) => {
@@ -734,6 +762,12 @@
       unlistenMoved = await nativeWindow.onMoved(({ payload: position }) => {
         scheduleAvatarPositionSave(position);
       });
+
+      // Windows 拖拽到桌面顶部附近时，系统可能短暂调整窗口尺寸。
+      // 这里在 resize 后回正到当前配置尺寸，避免出现“拖一下就变小一圈”。
+      unlistenResized = await nativeWindow.onResized(() => {
+        scheduleAvatarSizeCorrection();
+      });
     })();
 
     return () => {
@@ -741,6 +775,8 @@
       clearTimeout(transitionTimer);
       clearTimeout(positionSaveTimer);
       clearTimeout(motionTimer);
+      clearTimeout(sizeCorrectionTimer);
+      clearTimeout(resizeGuardTimer);
       clearFocusTimer();
       if (handleVisibilityChange) document.removeEventListener('visibilitychange', handleVisibilityChange);
       if (handleContextMenu) document.removeEventListener('contextmenu', handleContextMenu);
@@ -752,6 +788,7 @@
       unlistenInput();
       unlistenLocaleChanged();
       unlistenMoved();
+      unlistenResized();
     };
   });
 </script>

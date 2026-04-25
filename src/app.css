@@ -285,6 +285,22 @@
   @apply px-5 pt-5 pb-5 animate-fadeIn relative;
 }
 
+/* 超宽屏下做轻量收束，避免窗口最大化时内容被横向拉得过散 */
+@media (min-width: 1600px) {
+  .page-shell {
+    max-width: 92rem;
+    margin-left: auto;
+    margin-right: auto;
+  }
+}
+
+@media (min-width: 1920px) {
+  .app-shell-stage {
+    max-width: 116rem;
+    margin: 0.5rem auto;
+  }
+}
+
 .page-header {
   @apply flex flex-wrap items-start justify-between gap-4 mb-5;
 }

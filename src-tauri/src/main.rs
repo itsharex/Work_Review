@@ -18,7 +18,9 @@ mod database;
 mod error;
 mod idle_detector;
 mod linux_session;
+mod localhost_api;
 mod monitor;
+mod node_gateway;
 mod ocr;
 mod ocr_logger;
 mod privacy;
@@ -350,6 +352,7 @@ pub struct AppState {
     pub is_paused: bool,
     pub avatar_state: avatar_engine::AvatarStatePayload,
     pub avatar_generating_report: bool,
+    pub localhost_api_runtime: localhost_api::LocalhostApiRuntime,
     /// avatar 循环缓存的活动窗口（时间戳 + 窗口信息），供 screenshot 循环复用
     pub cached_active_window: Option<(std::time::Instant, monitor::ActiveWindow)>,
 }
@@ -680,7 +683,8 @@ fn record_avatar_window_switch(runtime: &mut AvatarNudgeRuntime, now_ms: u64) ->
 }
 
 fn count_open_avatar_followups_for_nudge(items: &[AvatarFollowupItem], now_ts: i64) -> usize {
-    items.iter()
+    items
+        .iter()
         .filter(|item| item.status == "open")
         .filter(|item| now_ts.saturating_sub(item.created_at) >= AVATAR_BACKLOG_NUDGE_MIN_AGE_SECS)
         .count()
@@ -698,7 +702,8 @@ fn should_emit_avatar_backlog_nudge(
     }
 
     if runtime.last_backlog_nudge_at_ms != 0
-        && now_ms.saturating_sub(runtime.last_backlog_nudge_at_ms) < AVATAR_BACKLOG_NUDGE_COOLDOWN_MS
+        && now_ms.saturating_sub(runtime.last_backlog_nudge_at_ms)
+            < AVATAR_BACKLOG_NUDGE_COOLDOWN_MS
     {
         return None;
     }
@@ -1484,8 +1489,7 @@ async fn background_avatar_task(state: Arc<Mutex<AppState>>, app: AppHandle) {
             let now = chrono::Local::now();
             let now_ts = now.timestamp();
             let now_ms = now.timestamp_millis().max(0) as u64;
-            let switch_nudge_ready =
-                record_avatar_window_switch(&mut avatar_nudge_runtime, now_ms);
+            let switch_nudge_ready = record_avatar_window_switch(&mut avatar_nudge_runtime, now_ms);
             let date_from = (now - chrono::Duration::days(3))
                 .format("%Y-%m-%d")
                 .to_string();
@@ -1523,9 +1527,9 @@ async fn background_avatar_task(state: Arc<Mutex<AppState>>, app: AppHandle) {
                 if !emitted_followup && switch_nudge_ready {
                     avatar_engine::emit_avatar_bubble(
                         &app,
-                        &avatar_engine::AvatarBubblePayload::info(
-                            avatar_switch_nudge_message_key(&persona),
-                        ),
+                        &avatar_engine::AvatarBubblePayload::info(avatar_switch_nudge_message_key(
+                            &persona,
+                        )),
                     );
                 } else if !emitted_followup {
                     if let Some(count) = should_emit_avatar_backlog_nudge(
@@ -2874,6 +2878,7 @@ async fn main() {
             &initial_avatar_persona,
         ),
         avatar_generating_report: false,
+        localhost_api_runtime: localhost_api::LocalhostApiRuntime::default(),
         cached_active_window: None,
     }));
     let app_lifecycle_state = Arc::new(Mutex::new(AppLifecycleState::default()));
@@ -3001,6 +3006,11 @@ async fn main() {
 
             avatar_input::start_avatar_input_monitor(&app.handle());
             avatar_input::spawn_avatar_input_bridge(app.handle().clone());
+
+            if let Err(e) = localhost_api::sync_localhost_api_runtime(&app.handle(), state.inner())
+            {
+                log::warn!("初始化本地 API 失败: {e}");
+            }
 
             // 创建 Tauri v2 系统托盘
             let show = MenuItemBuilder::with_id(TRAY_MENU_SHOW_ID, "显示窗口").build(app)?;
@@ -3189,6 +3199,12 @@ async fn main() {
             commands::generate_report,
             commands::get_saved_report,
             commands::export_report_markdown,
+            commands::get_localhost_api_status,
+            commands::get_node_gateway_status,
+            commands::register_node_gateway,
+            commands::send_node_gateway_heartbeat,
+            commands::reveal_localhost_api_token,
+            commands::rotate_localhost_api_token,
             commands::get_config,
             commands::save_config,
             commands::get_update_settings,
@@ -3309,16 +3325,18 @@ mod tests {
         browser_change_capture_min_interval_ms, effective_dock_visibility,
         launch_args_contain_autostart, main_window_close_behavior, monitoring_poll_interval_ms,
         monitoring_poll_interval_ms_for_platform, previous_app_backfill_duration,
-        recording_loop_decision, record_avatar_window_switch, resolve_activity_classification,
-        reusable_cached_active_window, should_emit_avatar_backlog_nudge,
-        screen_lock_check_interval_ms_for_platform, should_confirm_idle,
-        should_hide_main_window_on_setup, should_persist_merge_update, should_prevent_exit,
+        record_avatar_window_switch, recording_loop_decision, resolve_activity_classification,
+        reusable_cached_active_window, screen_lock_check_interval_ms_for_platform,
+        should_confirm_idle, should_emit_avatar_backlog_nudge, should_hide_main_window_on_setup,
+        should_persist_merge_update, should_prevent_exit,
         should_probe_browser_url_before_change_detection, should_request_screen_capture_permission,
         should_skip_system_window, tray_recording_toggle_action, tray_recording_toggle_label,
         AvatarNudgeRuntime, BreakReminderRuntime, BreakReminderSignal, MainWindowCloseBehavior,
         RecordingToggleAction,
     };
-    use crate::avatar_engine::{apply_avatar_visual_settings, default_avatar_state, derive_avatar_state};
+    use crate::avatar_engine::{
+        apply_avatar_visual_settings, default_avatar_state, derive_avatar_state,
+    };
     use crate::config::{AppConfig, AvatarFollowupItem, WebsiteSemanticRule};
     use crate::monitor::ActiveWindow;
     use std::time::{Duration, Instant};
@@ -3543,7 +3561,8 @@ mod tests {
 
     #[test]
     fn 暂停录制时桌宠应回到待命状态() {
-        let decision = avatar_activity_decision(true, true, true, 0.82, "keyboard-focus", "assistant");
+        let decision =
+            avatar_activity_decision(true, true, true, 0.82, "keyboard-focus", "assistant");
 
         assert!(!decision.should_continue);
         assert_eq!(
@@ -3559,7 +3578,8 @@ mod tests {
 
     #[test]
     fn 停止录制时桌宠应回到待命状态() {
-        let decision = avatar_activity_decision(true, false, false, 0.82, "minimal-office", "assistant");
+        let decision =
+            avatar_activity_decision(true, false, false, 0.82, "minimal-office", "assistant");
 
         assert!(!decision.should_continue);
         assert_eq!(
