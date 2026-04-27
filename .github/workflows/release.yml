@@ -54,6 +54,29 @@ jobs:
             patchelf \
             libfuse2
 
+      - name: Import macOS code signing certificate
+        if: startsWith(matrix.platform, 'macos')
+        env:
+          MACOS_CODESIGN_P12: ${{ secrets.MACOS_CODESIGN_P12 }}
+          MACOS_CODESIGN_PASSWORD: ${{ secrets.MACOS_CODESIGN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$MACOS_CODESIGN_P12" ]]; then
+            echo "::warning::MACOS_CODESIGN_P12 secret not set, skipping code signing import"
+            exit 0
+          fi
+          echo "$MACOS_CODESIGN_P12" | base64 -d > /tmp/codesign.p12
+          security create-keychain -p actions ci-keychain 2>/dev/null || true
+          security unlock-keychain -p actions ci-keychain
+          security import /tmp/codesign.p12 \
+            -k ci-keychain \
+            -P "$MACOS_CODESIGN_PASSWORD" \
+            -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k actions ci-keychain
+          security list-keychains -d user -s ci-keychain
+          rm -f /tmp/codesign.p12
+          echo "Code signing certificate imported"
+
       - name: Install frontend dependencies
         run: npm ci
 
@@ -71,6 +94,31 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: npm run tauri build -- ${{ matrix.args }}
+
+      - name: Re-sign macOS app with stable identity
+        if: startsWith(matrix.platform, 'macos')
+        shell: bash
+        run: |
+          set -euo pipefail
+          CERT_NAME="WorkReview Self-Signed"
+          if ! security find-certificate -c "$CERT_NAME" ci-keychain &>/dev/null; then
+            echo "No signing certificate found, skipping re-sign"
+            exit 0
+          fi
+
+          APP_PATH="$(find src-tauri/target -path '*/release/bundle/macos/*.app' -type d | sort | head -n 1 || true)"
+          if [[ -z "$APP_PATH" ]]; then
+            echo "No .app bundle found, skipping re-sign"
+            exit 0
+          fi
+
+          echo "Re-signing: $APP_PATH"
+          codesign --force --deep --sign "$CERT_NAME" \
+            --entitlements src-tauri/entitlements.plist \
+            --options runtime \
+            "$APP_PATH"
+          codesign -dvvv "$APP_PATH" 2>&1 | grep -E "Authority|Identifier"
+          echo "Re-sign complete"
 
       - name: Rename macOS updater assets
         if: startsWith(matrix.platform, 'macos')
