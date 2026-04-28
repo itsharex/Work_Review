@@ -94,7 +94,7 @@ jobs:
       - name: Run frontend tests
         run: node --test
 
-      - name: Build frontend assets
+      - name: Build frontend assets for Rust tests
         run: npm run build
 
       - name: Run Rust tests

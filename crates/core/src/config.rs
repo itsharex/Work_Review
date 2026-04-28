@@ -502,6 +502,9 @@ pub struct AppConfig {
     /// 日报 Markdown 导出目录
     #[serde(default)]
     pub daily_report_export_dir: Option<String>,
+    /// 日报自动生成时间 (HH:MM)，为空时使用工作结束时间
+    #[serde(default)]
+    pub daily_report_auto_generate_time: Option<String>,
     /// 是否启用本地 localhost API
     #[serde(default)]
     pub localhost_api_enabled: bool,
@@ -677,6 +680,7 @@ impl Default for AppConfig {
             storage: StorageConfig::default(),
             daily_report_custom_prompt: String::new(),
             daily_report_export_dir: None,
+            daily_report_auto_generate_time: None,
             localhost_api_enabled: false,
             localhost_api_host: None,
             localhost_api_port: DEFAULT_LOCALHOST_API_PORT,

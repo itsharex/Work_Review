@@ -266,6 +266,32 @@
         {t('settingsGeneral.addSegment')}
       </button>
       <p class="settings-note">{t('settingsGeneral.workTimeHint')}</p>
+
+      <div class="mt-3 flex flex-wrap items-center gap-2.5">
+        <span class="settings-text">{t('settingsGeneral.reportAutoGenerateTime')}</span>
+        <input
+          type="time"
+          value={config.daily_report_auto_generate_time ?? ''}
+          on:change={(e) => {
+            config.daily_report_auto_generate_time = e.target.value || null;
+            dispatch('change', config);
+          }}
+          class="w-24 bg-transparent text-sm font-mono text-slate-800 dark:text-white focus:outline-none"
+        />
+        {#if config.daily_report_auto_generate_time}
+          <button
+            type="button"
+            class="settings-action-secondary px-2.5 py-1.5 text-xs"
+            on:click={() => {
+              config.daily_report_auto_generate_time = null;
+              dispatch('change', config);
+            }}
+          >
+            {t('settingsGeneral.reportAutoGenerateReset')}
+          </button>
+        {/if}
+      </div>
+      <p class="settings-note">{t('settingsGeneral.reportAutoGenerateTimeHint')}</p>
     </div>
 
     <hr class="border-slate-200 dark:border-slate-700" />

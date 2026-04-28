@@ -189,6 +189,15 @@
   }
 
   function resolveAutoReportWorkEnd(config) {
+    // 优先使用用户自定义的日报生成时间
+    const customTime = config?.daily_report_auto_generate_time;
+    if (customTime && typeof customTime === 'string') {
+      const parts = customTime.split(':').map(Number);
+      if (parts.length >= 2 && Number.isFinite(parts[0]) && Number.isFinite(parts[1])) {
+        return { hour: Math.min(Math.max(parts[0], 0), 23), minute: Math.min(Math.max(parts[1], 0), 59) };
+      }
+    }
+
     const fallbackHour = normalizeTimePart(config?.work_end_hour ?? 18, 23);
     const fallbackMinute = normalizeTimePart(config?.work_end_minute ?? 0, 59);
     const segments = Array.isArray(config?.work_time_segments) ? config.work_time_segments : [];
