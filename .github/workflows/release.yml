@@ -16,7 +16,7 @@ jobs:
           - platform: macos-latest
             args: "--target aarch64-apple-darwin"
             target: aarch64-apple-darwin
-          - platform: macos-13
+          - platform: macos-latest
             args: "--target x86_64-apple-darwin"
             target: x86_64-apple-darwin
           - platform: ubuntu-22.04
@@ -109,9 +109,8 @@ jobs:
         run: |
           set -euo pipefail
 
-          # CI 中证书导入失败时，回退到 ad-hoc 签名，避免 macOS 构建直接中断
-          if [[ "${{ matrix.platform }}" == macos* ]] && [[ "${MACOS_CODESIGN_AVAILABLE:-}" != "1" ]]; then
-            echo "::warning::No macOS signing certificate imported, fallback to ad-hoc signing identity (-)."
+          # CI 中统一使用 ad-hoc 身份避免固定证书导致的跨 runner 构建不稳定
+          if [[ "${{ matrix.platform }}" == macos* ]]; then
             export APPLE_SIGNING_IDENTITY="-"
           fi
 
